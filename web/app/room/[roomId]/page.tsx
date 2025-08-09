@@ -68,6 +68,7 @@ export default function RoomPage() {
     const [pinnedId, setPinnedId] = useState<string | "self" | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number>(0);
     const [recentReaction, setRecentReaction] = useState<{ from: string; emoji: string; ts: number } | null>(null);
+    const [handRaisedMe, setHandRaisedMe] = useState(false);
     const [showChat, setShowChat] = useState(false);
     const [chatInput, setChatInput] = useState("");
     const [messages, setMessages] = useState<Array<{ from: string; text: string; ts: number }>>([]);
@@ -454,6 +455,12 @@ export default function RoomPage() {
         setTimeout(() => setRecentReaction(null), 1500);
     }
 
+    function toggleHand() {
+        const next = !handRaisedMe;
+        setHandRaisedMe(next);
+        socketRef.current?.emit("state-update", { roomId, partial: { handRaised: next } });
+    }
+
     function sendChat() {
         const text = chatInput.trim();
         if (!text) return;
@@ -711,7 +718,10 @@ export default function RoomPage() {
                         {peerIds.filter((id) => id !== pinnedId).map((id) => (
                             <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280, overflow: "hidden" }}>
                                 <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
-                                <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{(memberStateRef.current.get(id)?.name || id).slice(0, 12)}</Badge>
+                                <Badge bg="primary" className="position-absolute top-0 start-0 m-2">
+                                    {(memberStateRef.current.get(id)?.name || id).slice(0, 12)}
+                                    {memberStateRef.current.get(id)?.handRaised ? ' ✋' : ''}
+                                </Badge>
                                 <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
                                     {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
                                 </Badge>
@@ -746,14 +756,14 @@ export default function RoomPage() {
                     <ListGroup variant="flush">
                         <ListGroup.Item>
                             <div className="d-flex justify-content-between align-items-center">
-                                <span>{displayNameRef.current || "You"} <small className="text-muted">({selfId.slice(0, 6)})</small></span>
+                                <span>{displayNameRef.current || "You"} {handRaisedMe ? '✋' : ''} <small className="text-muted">({selfId.slice(0, 6)})</small></span>
                                 <span className={`badge bg-${muted ? "danger" : "success"}`}>{muted ? "Muted" : "Mic On"}</span>
                             </div>
                         </ListGroup.Item>
                         {peerIds.map((id) => (
                             <ListGroup.Item key={id}>
                                 <div className="d-flex justify-content-between align-items-center">
-                                    <span>{memberStateRef.current.get(id)?.name || id} <small className="text-muted">({id.slice(0, 6)})</small></span>
+                                    <span>{memberStateRef.current.get(id)?.name || id} {memberStateRef.current.get(id)?.handRaised ? '✋' : ''} <small className="text-muted">({id.slice(0, 6)})</small></span>
                                     <span className={`badge bg-${memberStateRef.current.get(id)?.muted ? "danger" : "success"}`}>
                                         {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
                                     </span>
@@ -848,7 +858,7 @@ export default function RoomPage() {
                         <Button variant="outline-secondary" onClick={shareScreen}>Share Screen</Button>
                         <Button variant="outline-secondary" onClick={() => sendReaction("👍")}>👍</Button>
                         <Button variant="outline-secondary" onClick={() => sendReaction("👏")}>👏</Button>
-                        <Button variant="outline-secondary" onClick={() => sendReaction("✋")}>✋</Button>
+                        <Button variant={handRaisedMe ? "warning" : "outline-secondary"} onClick={toggleHand}>✋</Button>
                         <Button variant={inviteCopied ? "success" : "outline-secondary"} onClick={invite}>{inviteCopied ? "Link Copied" : "Invite"}</Button>
                         <Button variant="danger" onClick={hangup}>Hang up</Button>
                     </ButtonGroup>
