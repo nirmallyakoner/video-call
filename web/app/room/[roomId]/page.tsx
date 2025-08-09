@@ -65,11 +65,13 @@ export default function RoomPage() {
     const [showRoster, setShowRoster] = useState(true);
     const [inviteCopied, setInviteCopied] = useState(false);
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+    const [pinnedId, setPinnedId] = useState<string | "self" | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number>(0);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
     const localSideRef = useRef<HTMLVideoElement>(null);
+    const localStageRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
     const remoteRefCbMapRef = useRef<Record<string, (el: HTMLVideoElement | null) => void>>({});
     const peerMapRef = useRef<Map<string, PeerState>>(new Map());
@@ -110,6 +112,18 @@ export default function RoomPage() {
         };
         remoteRefCbMapRef.current[peerId] = cb;
         return cb;
+    }, []);
+
+    const setLocalVideoRef = useCallback((el: HTMLVideoElement | null) => {
+        localSideRef.current = el;
+        const stream = localStreamRef.current;
+        if (el && stream) {
+            el.srcObject = stream;
+            el.muted = true;
+            el.playsInline = true;
+            (el as any).autoplay = true;
+            el.play().catch(() => { /* ignore autoplay block; overlay handles */ });
+        }
     }, []);
 
     const connectSocket = useMemo(() => () => {
@@ -252,7 +266,11 @@ export default function RoomPage() {
             el.muted = true;
             await el.play().catch((err) => { dbg("local video play blocked", err); });
         };
-        await Promise.all([attachLocal(localPipRef.current), attachLocal(localSideRef.current)]);
+        await Promise.all([
+            attachLocal(localPipRef.current),
+            attachLocal(localSideRef.current),
+            attachLocal(localStageRef.current),
+        ]);
 
         // Prepare local audio level monitoring
         try {
@@ -529,11 +547,12 @@ export default function RoomPage() {
                         <div>
                             <strong>Room:</strong> {roomId}
                         </div>
-                        <div>
+                        <div className="d-flex align-items-center">
                             <small className={isConnected ? "text-success" : "text-danger"}>
                                 {isConnected ? "Connected" : "Disconnected"}
                             </small>
-                            <small className="ms-3 text-muted">{new Date(elapsedMs).toISOString().slice(11, 19)}</small>
+                            <small className="ms-3 text-white">{new Date(elapsedMs).toISOString().slice(11, 19)}</small>
+                            <Button size="sm" variant="outline-light" className="ms-3" onClick={() => setShowRoster(true)}>Participants</Button>
                         </div>
                     </div>
                 </Col>
@@ -549,23 +568,29 @@ export default function RoomPage() {
                 </Row>
             )}
 
+
+
             <Row>
                 <Col xs={12} md={8} className="mb-3">
                     <div className="d-flex flex-wrap gap-3 justify-content-center">
-                        {/* Local self-view */}
-                        <div className={`position-relative ${activeSpeakerId === selfId ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
-                            <video ref={localSideRef} playsInline autoPlay className="w-100 h-100 mirror" />
-                            <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">{displayNameRef.current || "You"}</Badge>
-                            <Badge bg={muted ? "danger" : "success"} className="position-absolute top-0 end-0 m-2">{muted ? "Muted" : "Mic On"}</Badge>
-                        </div>
+                        {/* Local self-view (hidden if pinned) */}
+                        {pinnedId !== "self" && (
+                            <div className={`position-relative ${activeSpeakerId === selfId ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
+                                <video ref={setLocalVideoRef} playsInline autoPlay className="w-100 h-100 mirror" />
+                                <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">{displayNameRef.current || "You"}</Badge>
+                                <Badge bg={muted ? "danger" : "success"} className="position-absolute top-0 end-0 m-2">{muted ? "Muted" : "Mic On"}</Badge>
+                                <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId("self")}>Pin</Button>
+                            </div>
+                        )}
                         {/* Remote peers grid */}
-                        {peerIds.map((id) => (
+                        {peerIds.filter((id) => id !== pinnedId).map((id) => (
                             <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
                                 <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
                                 <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{(memberStateRef.current.get(id)?.name || id).slice(0, 12)}</Badge>
                                 <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
                                     {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
                                 </Badge>
+                                <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(pinnedId === id ? null : id)}>{pinnedId === id ? "Unpin" : "Pin"}</Button>
                             </div>
                         ))}
                     </div>
@@ -576,7 +601,10 @@ export default function RoomPage() {
                     )}
                 </Col>
                 <Col xs={12} md={4} className="mb-3 d-flex justify-content-end">
-                    <Button size="sm" variant="outline-light" onClick={() => setShowRoster(true)}>Participants</Button>
+                    <div className="d-flex gap-2">
+                        {pinnedId && <Button size="sm" variant="outline-light" onClick={() => setPinnedId(null)}>Unpin</Button>}
+                        {/* <Button size="sm" variant="outline-light" onClick={() => setShowRoster(true)}>Participants</Button> */}
+                    </div>
                 </Col>
             </Row>
 
@@ -607,6 +635,25 @@ export default function RoomPage() {
                     </ListGroup>
                 </Offcanvas.Body>
             </Offcanvas>
+
+            {/* Stage for pinned tile */}
+            {pinnedId && (
+                <Row className="mb-3">
+                    <Col xs={12} className="d-flex justify-content-center">
+                        <div className={`position-relative ${activeSpeakerId === (pinnedId === "self" ? selfId : pinnedId) ? "border border-3 border-warning" : ""}`} style={{ width: "min(100%, 720px)" }}>
+                            {pinnedId === "self" ? (
+                                <video ref={setLocalVideoRef} playsInline autoPlay className="w-100 h-100 mirror" />
+                            ) : (
+                                <video ref={getRemoteRefCallback(pinnedId)} playsInline autoPlay className="w-100 h-100" />
+                            )}
+                            <Badge bg={pinnedId === "self" ? "secondary" : "primary"} className="position-absolute top-0 start-0 m-2">
+                                {pinnedId === "self" ? (displayNameRef.current || "You").slice(0, 12) : (memberStateRef.current.get(pinnedId)?.name || pinnedId).slice(0, 12)}
+                            </Badge>
+                            <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(null)}>Unpin</Button>
+                        </div>
+                    </Col>
+                </Row>
+            )}
 
             <Row className="mt-3">
                 <Col className="d-flex justify-content-center">
