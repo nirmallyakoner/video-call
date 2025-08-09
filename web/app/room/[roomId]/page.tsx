@@ -64,6 +64,7 @@ export default function RoomPage() {
     const [preJoinName, setPreJoinName] = useState("");
     const [showRoster, setShowRoster] = useState(true);
     const [inviteCopied, setInviteCopied] = useState(false);
+    const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
@@ -75,6 +76,12 @@ export default function RoomPage() {
     const localStreamRef = useRef<MediaStream | null>(null);
     const needsPlaySetRef = useRef<Set<string>>(new Set());
     const displayNameRef = useRef<string>("");
+    const volumeRef = useRef<Map<string, number>>(new Map());
+    const prevEnergyRef = useRef<Map<string, { energy: number; duration: number }>>(new Map());
+    const statsIntervalRef = useRef<number | null>(null);
+    const localAudioContextRef = useRef<AudioContext | null>(null);
+    const localAnalyserRef = useRef<AnalyserNode | null>(null);
+    const localLevelRef = useRef<number>(0);
 
     const refreshPeerIds = useCallback(() => {
         setPeerIds(Array.from(peerMapRef.current.keys()));
@@ -235,6 +242,19 @@ export default function RoomPage() {
             await el.play().catch((err) => { dbg("local video play blocked", err); });
         };
         await Promise.all([attachLocal(localPipRef.current), attachLocal(localSideRef.current)]);
+
+        // Prepare local audio level monitoring
+        try {
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const src = ctx.createMediaStreamSource(stream);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 512;
+            src.connect(analyser);
+            localAudioContextRef.current = ctx;
+            localAnalyserRef.current = analyser;
+        } catch (_e) {
+            // AudioContext may fail without user gesture; ignore
+        }
     }
 
     function ensurePeerConnection(peerId: string, isCaller: boolean): RTCPeerConnection {
@@ -360,6 +380,64 @@ export default function RoomPage() {
         }
     }
 
+    // Periodically compute audio levels per peer and highlight active speaker
+    const startActiveSpeakerMonitor = useCallback(() => {
+        if (statsIntervalRef.current) return;
+        const interval = window.setInterval(async () => {
+            // Compute local level via Analyser if available
+            try {
+                if (localAnalyserRef.current && selfId) {
+                    const analyser = localAnalyserRef.current;
+                    const bins = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteTimeDomainData(bins);
+                    let sum = 0;
+                    for (let i = 0; i < bins.length; i++) {
+                        const v = (bins[i] - 128) / 128; // -1..1
+                        sum += v * v;
+                    }
+                    const rms = Math.sqrt(sum / bins.length);
+                    localLevelRef.current = rms;
+                    volumeRef.current.set(selfId, rms);
+                }
+            } catch { }
+
+            // For each peer, use getStats to estimate inbound audio energy rate
+            for (const [peerId, { pc }] of peerMapRef.current) {
+                try {
+                    const stats = await pc.getStats();
+                    let best = 0;
+                    stats.forEach((r: any) => {
+                        if (r.type === "inbound-rtp" && (r.kind === "audio" || r.mediaType === "audio")) {
+                            if (typeof r.audioLevel === "number") {
+                                best = Math.max(best, r.audioLevel);
+                            } else if (typeof r.totalAudioEnergy === "number" && typeof r.totalSamplesDuration === "number") {
+                                const prev = prevEnergyRef.current.get(peerId) || { energy: 0, duration: 0 };
+                                const dE = Math.max(0, r.totalAudioEnergy - prev.energy);
+                                const dT = Math.max(0.001, r.totalSamplesDuration - prev.duration);
+                                const level = dE / dT; // average energy in window
+                                prevEnergyRef.current.set(peerId, { energy: r.totalAudioEnergy, duration: r.totalSamplesDuration });
+                                best = Math.max(best, level);
+                            }
+                        }
+                    });
+                    // Basic smoothing
+                    const old = volumeRef.current.get(peerId) ?? 0;
+                    const smoothed = old * 0.7 + best * 0.3;
+                    volumeRef.current.set(peerId, smoothed);
+                } catch { /* ignore */ }
+            }
+
+            // Select the loudest over a threshold
+            let maxId: string | null = null;
+            let maxVal = 0.05; // threshold to avoid noise
+            for (const [id, val] of volumeRef.current.entries()) {
+                if (val > maxVal) { maxVal = val; maxId = id; }
+            }
+            setActiveSpeakerId(maxId);
+        }, 500);
+        statsIntervalRef.current = interval as unknown as number;
+    }, [selfId]);
+
     function toggleMic() {
         if (!localStreamRef.current) return;
         const track = localStreamRef.current.getAudioTracks()[0];
@@ -415,12 +493,15 @@ export default function RoomPage() {
         if (!startedRef.current) {
             startedRef.current = true;
             connectSocket();
+            startActiveSpeakerMonitor();
         }
         return () => {
             try { socketRef.current?.removeAllListeners(); } catch { }
             try { socketRef.current?.disconnect(); } catch { }
             cleanupAllPeers();
             localStreamRef.current?.getTracks().forEach((t) => t.stop());
+            if (statsIntervalRef.current) { window.clearInterval(statsIntervalRef.current); statsIntervalRef.current = null; }
+            try { localAudioContextRef.current?.close(); } catch { }
             startedRef.current = false;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -460,14 +541,14 @@ export default function RoomPage() {
                 <Col xs={12} md={8} className="mb-3">
                     <div className="d-flex flex-wrap gap-3 justify-content-center">
                         {/* Local self-view */}
-                        <div className="position-relative" style={{ width: 280 }}>
+                        <div className={`position-relative ${activeSpeakerId === selfId ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
                             <video ref={localSideRef} playsInline autoPlay className="w-100 h-100 mirror" />
                             <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">{displayNameRef.current || "You"}</Badge>
                             <Badge bg={muted ? "danger" : "success"} className="position-absolute top-0 end-0 m-2">{muted ? "Muted" : "Mic On"}</Badge>
                         </div>
                         {/* Remote peers grid */}
                         {peerIds.map((id) => (
-                            <div key={id} className="position-relative" style={{ width: 280 }}>
+                            <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
                                 <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
                                 <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{(memberStateRef.current.get(id)?.name || id).slice(0, 12)}</Badge>
                                 <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
