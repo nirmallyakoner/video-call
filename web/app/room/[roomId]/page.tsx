@@ -26,7 +26,6 @@ const DEBUG = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const dbg = (...args: any[]) => {
     if (DEBUG) {
-        // eslint-disable-next-line no-console
         console.log(...args);
     }
 };
@@ -39,10 +38,9 @@ export default function RoomPage() {
     const [muted, setMuted] = useState(false);
     const [cameraOff, setCameraOff] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
-    const [peerState, setPeerState] = useState<string>("idle");
+    // Showing connection state in UI is optional; we log it only
     const [remoteMuted, setRemoteMuted] = useState(true);
     const [needsRemotePlay, setNeedsRemotePlay] = useState(false);
-    const [isInitiator, setIsInitiator] = useState(false);
 
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -72,11 +70,13 @@ export default function RoomPage() {
         socket.io.on("reconnect_attempt", () => dbg("reconnect_attempt"));
         socket.io.on("reconnect_error", (e: unknown) => dbg("reconnect_error", e));
         socket.io.on("reconnect_failed", () => dbg("reconnect_failed"));
-        // @ts-ignore
-        socket.on("connect_error", (e: any) => { dbg("connect_error", e?.message); setError(`signal connect error: ${e?.message || e}`); });
+        socket.on("connect_error", (e: Error) => {
+            const message = e?.message ?? "connect_error";
+            dbg("connect_error", message);
+            setError(`signal connect error: ${message}`);
+        });
 
         socket.on("joined", (payload: { isInitiator: boolean }) => {
-            setIsInitiator(payload.isInitiator);
             isInitiatorRef.current = payload.isInitiator;
             dbg("joined", payload);
             // Prepare media/PC but do NOT create offer yet. Wait for 'ready'.
@@ -148,7 +148,7 @@ export default function RoomPage() {
                 setError(String(e));
             }
         });
-    }, [roomId]);
+    }, [roomId, setupPeer]);
 
     const isInitiatorRef = useRef(false);
 
@@ -183,12 +183,12 @@ export default function RoomPage() {
 
         // Safari sometimes fires tracks only after remote description is set.
         // Also bind onaddstream for older implementations
-        // @ts-ignore legacy
-        pc.onaddstream = (e: any) => {
+        // @ts-expect-error legacy
+        pc.onaddstream = (e: unknown) => {
             dbg("onaddstream (legacy)");
-            if (remoteVideoRef.current && e.stream) {
-                remoteVideoRef.current.srcObject = e.stream;
-                // @ts-ignore
+            const stream = (e as { stream?: MediaStream }).stream;
+            if (remoteVideoRef.current && stream) {
+                remoteVideoRef.current.srcObject = stream;
                 remoteVideoRef.current.play?.().catch((err: unknown) => { dbg("remote video play blocked (legacy)", err); setNeedsRemotePlay(true); });
             }
         };
@@ -202,7 +202,6 @@ export default function RoomPage() {
 
         pc.oniceconnectionstatechange = () => {
             const state = pc.iceConnectionState;
-            setPeerState(state);
             dbg("iceConnectionState", state);
         };
 
@@ -245,7 +244,7 @@ export default function RoomPage() {
                 await remoteVideoRef.current.play();
                 setNeedsRemotePlay(false);
             }
-        } catch (err) {
+        } catch (_err) {
             setNeedsRemotePlay(true);
         }
     }
@@ -270,7 +269,11 @@ export default function RoomPage() {
 
     async function shareScreen() {
         try {
-            const display = await (navigator.mediaDevices as any).getDisplayMedia({ video: true });
+            const display = await (
+                navigator.mediaDevices as MediaDevices & {
+                    getDisplayMedia(options?: DisplayMediaStreamOptions): Promise<MediaStream>;
+                }
+            ).getDisplayMedia({ video: true });
             const videoTrack = display.getVideoTracks()[0];
             const sender = pcRef.current?.getSenders().find((s) => s.track?.kind === "video");
             if (sender && videoTrack) {
