@@ -9,14 +9,22 @@ const MAX_ROOM_SIZE = process.env.MAX_ROOM_SIZE
     ? Number(process.env.MAX_ROOM_SIZE)
     : 10; // default cap for group calls
 
-type JoinPayload = { roomId: string };
+type JoinPayload = { roomId: string; name?: string };
 type SignalPayload =
     | { roomId: string; type: "offer"; sdp: any; to: string }
     | { roomId: string; type: "answer"; sdp: any; to: string }
     | { roomId: string; type: "candidate"; candidate: any; to: string };
 
+type MemberState = {
+    name: string;
+    muted: boolean;
+    videoOn: boolean;
+    handRaised?: boolean;
+    role: "host" | "guest";
+};
+
 type RoomInfo = {
-    members: Set<string>; // socket ids
+    members: Map<string, MemberState>; // socket id -> state
 };
 
 const app = express();
@@ -35,25 +43,36 @@ const rooms: Map<string, RoomInfo> = new Map();
 io.on("connection", (socket) => {
     // eslint-disable-next-line no-console
     console.log("socket connected:", socket.id);
-    socket.on("join", ({ roomId }: JoinPayload) => {
+    socket.on("join", ({ roomId, name }: JoinPayload) => {
         // eslint-disable-next-line no-console
         console.log(`join request: room=${roomId} socket=${socket.id}`);
-        const room = rooms.get(roomId) || { members: new Set<string>() };
+        const room = rooms.get(roomId) || { members: new Map<string, MemberState>() };
         if (room.members.size >= MAX_ROOM_SIZE) {
             socket.emit("error", "room-full");
             return;
         }
-        room.members.add(socket.id);
+        const role: MemberState["role"] = room.members.size === 0 ? "host" : "guest";
+        const safeName = (name && String(name).slice(0, 64)) || `Guest-${socket.id.slice(0, 6)}`;
+        const state: MemberState = {
+            name: safeName,
+            muted: false,
+            videoOn: true,
+            handRaised: false,
+            role,
+        };
+        room.members.set(socket.id, state);
         rooms.set(roomId, room);
 
         socket.join(roomId);
 
         // Acknowledge with current peers (excluding self)
-        const peers = [...room.members].filter((id) => id !== socket.id);
+        const peers = [...room.members.entries()]
+            .filter(([id]) => id !== socket.id)
+            .map(([id, s]) => ({ id, ...s }));
         socket.emit("joined", { selfId: socket.id, peers });
 
         // Notify others in the room about the new peer
-        socket.to(roomId).emit("peer-joined", { id: socket.id });
+        socket.to(roomId).emit("peer-joined", { id: socket.id, ...state });
     });
 
     socket.on("signal", (payload: SignalPayload) => {
@@ -89,6 +108,16 @@ io.on("connection", (socket) => {
                 if (room.members.size === 0) rooms.delete(roomId);
             }
         }
+    });
+
+    socket.on("state-update", ({ roomId, partial }: { roomId: string; partial: Partial<MemberState> }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const current = room.members.get(socket.id);
+        if (!current) return;
+        const updated: MemberState = { ...current, ...partial };
+        room.members.set(socket.id, updated);
+        socket.to(roomId).emit("state-update", { id: socket.id, partial });
     });
 });
 
