@@ -12,4 +12,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        value: "https://video-call-beta-umber.vercel.app"
+        value: "https://nirmallya-koner.vercel.app"
