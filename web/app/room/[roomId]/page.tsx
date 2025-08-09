@@ -344,6 +344,7 @@ export default function RoomPage() {
             <Row>
                 <Col xs={12} md={8} className="mb-3">
                     <div className="call-stage d-flex align-items-center justify-content-center">
+                        {/* Remote should never be mirrored */}
                         <video ref={remoteVideoRef} playsInline autoPlay className="video-surface" />
                         {needsRemotePlay && (
                             <div className="position-absolute top-0 start-0 mb-3 w-100 h-100 d-flex align-items-center justify-content-center" style={{ background: "rgba(0,0,0,0.4)" }}>
@@ -353,13 +354,14 @@ export default function RoomPage() {
                         <span className="position-absolute top-0 start-0 badge bg-primary m-2">Peer</span>
                         {/* Local PiP on small screens */}
                         <div className="local-pip mt-3 d-md-none">
-                            <video ref={localPipRef} playsInline autoPlay className="w-100 h-100" />
+                            {/* Local preview mirrored for natural self-view */}
+                            <video ref={localPipRef} playsInline autoPlay className="w-100 h-100 mirror" />
                         </div>
                     </div>
                 </Col>
                 <Col xs={12} md={4} className="mb-3 d-none d-md-block">
                     <div className="position-relative">
-                        <video ref={localSideRef} playsInline autoPlay className="video-surface" />
+                        <video ref={localSideRef} playsInline autoPlay className="video-surface mirror" />
                         <span className="position-absolute top-0 start-0 badge bg-secondary m-2">You</span>
                     </div>
                 </Col>

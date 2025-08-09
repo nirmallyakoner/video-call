@@ -40,6 +40,12 @@ body {
   object-fit: contain;
 }
 
+/* Mirror helper (use on local preview only if your device shows mirrored) */
+video.mirror {
+  transform: scaleX(-1) !important;
+  -webkit-transform: scaleX(-1) !important;
+}
+
 /* Local picture-in-picture on small screens */
 .local-pip {
   position: absolute;
