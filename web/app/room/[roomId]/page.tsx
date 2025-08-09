@@ -1,14 +1,14 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Button, ButtonGroup, Container, Row, Col, Alert } from "react-bootstrap";
+import { Button, ButtonGroup, Container, Row, Col, Alert, Badge } from "react-bootstrap";
 import io, { Socket } from "socket.io-client";
 
 type SignalMessage =
-    | { type: "offer"; sdp: RTCSessionDescriptionInit }
-    | { type: "answer"; sdp: RTCSessionDescriptionInit }
-    | { type: "candidate"; candidate: RTCIceCandidateInit }
-    | { type: "peer-left" };
+    | { type: "offer"; sdp: RTCSessionDescriptionInit; from: string }
+    | { type: "answer"; sdp: RTCSessionDescriptionInit; from: string }
+    | { type: "candidate"; candidate: RTCIceCandidateInit; from: string };
+type JoinedMessage = { selfId: string; peers: string[] };
 
 const SIGNAL_URL = (process.env.NEXT_PUBLIC_SIGNAL_URL as string) || "ws://localhost:8080";
 const ICE_SERVERS: RTCIceServer[] = (() => {
@@ -30,6 +30,13 @@ const dbg = (...args: any[]) => {
     }
 };
 
+type PeerState = {
+    pc: RTCPeerConnection;
+    remoteStream: MediaStream | null;
+    pendingCandidates: RTCIceCandidateInit[];
+    isCaller: boolean;
+};
+
 export default function RoomPage() {
     const params = useParams();
     const roomId = (params as Record<string, string>).roomId;
@@ -38,17 +45,35 @@ export default function RoomPage() {
     const [muted, setMuted] = useState(false);
     const [cameraOff, setCameraOff] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
-    // Showing connection state in UI is optional; we log it only
-    const [remoteMuted, setRemoteMuted] = useState(true);
     const [needsRemotePlay, setNeedsRemotePlay] = useState(false);
+    const [selfId, setSelfId] = useState<string>("");
+    const [peerIds, setPeerIds] = useState<string[]>([]);
 
     const localPipRef = useRef<HTMLVideoElement>(null);
     const localSideRef = useRef<HTMLVideoElement>(null);
-    const remoteVideoRef = useRef<HTMLVideoElement>(null);
-    const pcRef = useRef<RTCPeerConnection | null>(null);
+    const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+    const peerMapRef = useRef<Map<string, PeerState>>(new Map());
     const socketRef = useRef<Socket | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
-    const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+    const needsPlaySetRef = useRef<Set<string>>(new Set());
+
+    const refreshPeerIds = useCallback(() => {
+        setPeerIds(Array.from(peerMapRef.current.keys()));
+    }, []);
+
+    const attachRemoteRef = (peerId: string) => (el: HTMLVideoElement | null) => {
+        remoteVideoRefs.current[peerId] = el;
+        const peerState = peerMapRef.current.get(peerId);
+        if (el && peerState?.remoteStream) {
+            el.srcObject = peerState.remoteStream;
+            el.playsInline = true;
+            el.autoplay = true as unknown as boolean;
+            el.play().catch(() => {
+                needsPlaySetRef.current.add(peerId);
+                setNeedsRemotePlay(true);
+            });
+        }
+    };
 
     const connectSocket = useMemo(() => () => {
         dbg("SIGNAL_URL", SIGNAL_URL, "room", roomId);
@@ -77,83 +102,89 @@ export default function RoomPage() {
             setError(`signal connect error: ${message}`);
         });
 
-        socket.on("joined", (payload: { isInitiator: boolean }) => {
-            isInitiatorRef.current = payload.isInitiator;
+        socket.on("joined", async (payload: JoinedMessage) => {
             dbg("joined", payload);
-            // Prepare media/PC but do NOT create offer yet. Wait for 'ready'.
-            setupPeer().catch((e) => setError(String(e)));
-        });
-
-        socket.on("ready", async () => {
-            dbg("room ready");
-            // Only the initiator should create the offer once both peers are present
-            if (isInitiatorRef.current && pcRef.current) {
+            setSelfId(payload.selfId);
+            try {
+                await setupLocalMedia();
+            } catch (e) {
+                setError(String(e));
+                return;
+            }
+            // As the new joiner, create offers to all existing peers
+            for (const peerId of payload.peers) {
+                const pc = ensurePeerConnection(peerId, true);
                 try {
-                    const offer = await pcRef.current.createOffer();
-                    await pcRef.current.setLocalDescription(offer);
-                    dbg("created offer");
-                    socket.emit("signal", { roomId, type: "offer", sdp: offer });
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    socket.emit("signal", { roomId, type: "offer", sdp: offer, to: peerId });
+                    dbg("sent offer →", peerId);
                 } catch (e) {
                     setError(String(e));
                 }
             }
+            refreshPeerIds();
+        });
+
+        socket.on("peer-joined", ({ id }: { id: string }) => {
+            dbg("peer-joined", id);
+            // Prepare a connection to accept their offer later
+            ensurePeerConnection(id, false);
+            refreshPeerIds();
+        });
+
+        socket.on("peer-left", ({ id }: { id: string }) => {
+            dbg("peer-left", id);
+            closePeer(id);
+            refreshPeerIds();
         });
 
         socket.on("signal", async (msg: SignalMessage) => {
-            dbg("recv signal", msg.type);
+            const from = (msg as any).from as string;
+            dbg("recv signal", msg.type, "from", from);
+            const pc = ensurePeerConnection(from, false);
             try {
                 if (msg.type === "offer") {
-                    // Create the peer connection if it was cleared due to hot reloads
-                    if (!pcRef.current) {
-                        dbg("pcRef empty on offer → setupPeer()");
-                        await setupPeer();
-                    }
-                    await pcRef.current?.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
                     // flush any queued candidates now that remoteDescription exists
-                    for (const c of pendingCandidatesRef.current) {
-                        await pcRef.current?.addIceCandidate(new RTCIceCandidate(c));
-                        dbg("flushed queued candidate");
+                    const state = peerMapRef.current.get(from);
+                    if (state) {
+                        for (const c of state.pendingCandidates) {
+                            await pc.addIceCandidate(new RTCIceCandidate(c));
+                        }
+                        state.pendingCandidates = [];
                     }
-                    pendingCandidatesRef.current = [];
-                    const answer = await pcRef.current?.createAnswer();
-                    if (answer) {
-                        await pcRef.current?.setLocalDescription(answer);
-                        dbg("created answer");
-                        socket.emit("signal", { roomId, type: "answer", sdp: answer });
-                    }
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    socket.emit("signal", { roomId, type: "answer", sdp: answer, to: from });
+                    dbg("sent answer →", from);
                 } else if (msg.type === "answer") {
-                    if (!pcRef.current) {
-                        dbg("pcRef empty on answer → setupPeer()");
-                        await setupPeer();
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    const state = peerMapRef.current.get(from);
+                    if (state) {
+                        for (const c of state.pendingCandidates) {
+                            await pc.addIceCandidate(new RTCIceCandidate(c));
+                        }
+                        state.pendingCandidates = [];
                     }
-                    await pcRef.current?.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                    for (const c of pendingCandidatesRef.current) {
-                        await pcRef.current?.addIceCandidate(new RTCIceCandidate(c));
-                        dbg("flushed queued candidate");
-                    }
-                    pendingCandidatesRef.current = [];
                 } else if (msg.type === "candidate" && msg.candidate) {
-                    if (!pcRef.current || !pcRef.current.remoteDescription || !pcRef.current.remoteDescription.type) {
-                        pendingCandidatesRef.current.push(msg.candidate);
-                        dbg("queued candidate (no remoteDescription yet)");
+                    if (!pc.remoteDescription || !pc.remoteDescription.type) {
+                        const state = peerMapRef.current.get(from);
+                        if (state) state.pendingCandidates.push(msg.candidate);
+                        dbg("queued candidate (no remoteDescription yet) from", from);
                     } else {
-                        await pcRef.current?.addIceCandidate(new RTCIceCandidate(msg.candidate));
-                        dbg("added candidate");
+                        await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                        dbg("added candidate from", from);
                     }
-                } else if (msg.type === "peer-left") {
-                    dbg("peer-left");
-                    cleanupRemote();
                 }
             } catch (e) {
                 dbg("signal handling error", e);
                 setError(String(e));
             }
         });
-    }, [roomId, setupPeer]);
+    }, [roomId]);
 
-    const isInitiatorRef = useRef(false);
-
-    async function setupPeer() {
+    async function setupLocalMedia() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
         localStreamRef.current = stream;
         dbg("gotUserMedia", stream.getTracks().map(t => `${t.kind}:${t.readyState}`));
@@ -164,75 +195,95 @@ export default function RoomPage() {
             await el.play().catch((err) => { dbg("local video play blocked", err); });
         };
         await Promise.all([attachLocal(localPipRef.current), attachLocal(localSideRef.current)]);
+    }
+
+    function ensurePeerConnection(peerId: string, isCaller: boolean): RTCPeerConnection {
+        const existing = peerMapRef.current.get(peerId)?.pc;
+        if (existing) return existing;
 
         const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-        pcRef.current = pc;
-        dbg("pc created", ICE_SERVERS);
-        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        const state: PeerState = { pc, remoteStream: null, pendingCandidates: [], isCaller };
+        peerMapRef.current.set(peerId, state);
+
+        const stream = localStreamRef.current;
+        if (stream) {
+            stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+        }
 
         pc.ontrack = (e) => {
             const remoteStream = e.streams[0];
-            dbg("ontrack", remoteStream?.id, remoteStream?.getTracks().map(t => `${t.kind}:${t.readyState}`));
-            if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = remoteStream;
-                // Allow autoplay across browsers by muting initially
-                remoteVideoRef.current.muted = remoteMuted;
-                remoteVideoRef.current.play().catch((err) => {
-                    dbg("remote video play blocked", err);
+            state.remoteStream = remoteStream;
+            const el = remoteVideoRefs.current[peerId];
+            if (el) {
+                el.srcObject = remoteStream;
+                el.muted = false;
+                el.play().catch(() => {
+                    needsPlaySetRef.current.add(peerId);
                     setNeedsRemotePlay(true);
                 });
             }
         };
 
-        // Safari sometimes fires tracks only after remote description is set.
-        // Also bind onaddstream for older implementations
         // @ts-expect-error legacy
         pc.onaddstream = (e: unknown) => {
             dbg("onaddstream (legacy)");
-            const stream = (e as { stream?: MediaStream }).stream;
-            if (remoteVideoRef.current && stream) {
-                remoteVideoRef.current.srcObject = stream;
-                remoteVideoRef.current.play?.().catch((err: unknown) => { dbg("remote video play blocked (legacy)", err); setNeedsRemotePlay(true); });
+            const remote = (e as { stream?: MediaStream }).stream;
+            if (remote) {
+                state.remoteStream = remote;
+                const el = remoteVideoRefs.current[peerId];
+                if (el) {
+                    el.srcObject = remote;
+                    el.play?.().catch(() => { needsPlaySetRef.current.add(peerId); setNeedsRemotePlay(true); });
+                }
             }
         };
 
         pc.onicecandidate = (e) => {
             if (e.candidate) {
-                socketRef.current?.emit("signal", { roomId, type: "candidate", candidate: e.candidate });
-                dbg("ice candidate", e.candidate.type, e.candidate.protocol, e.candidate.address);
+                socketRef.current?.emit("signal", { roomId, type: "candidate", candidate: e.candidate, to: peerId });
+                dbg("ice candidate →", peerId);
             }
         };
 
         pc.oniceconnectionstatechange = () => {
-            const state = pc.iceConnectionState;
-            dbg("iceConnectionState", state);
+            dbg("iceConnectionState", peerId, pc.iceConnectionState);
         };
-
-        pc.onconnectionstatechange = () => dbg("connectionState", pc.connectionState);
-        pc.onsignalingstatechange = () => dbg("signalingState", pc.signalingState);
-        // Not in TS types: use event listener
+        pc.onconnectionstatechange = () => dbg("connectionState", peerId, pc.connectionState);
+        pc.onsignalingstatechange = () => dbg("signalingState", peerId, pc.signalingState);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pc as any).addEventListener?.("icecandidateerror", (ev: any) => dbg("icecandidateerror", ev?.errorCode, ev?.errorText));
-        pc.onnegotiationneeded = () => dbg("negotiationneeded");
+        (pc as any).addEventListener?.("icecandidateerror", (ev: any) => dbg("icecandidateerror", peerId, ev?.errorCode, ev?.errorText));
+        pc.onnegotiationneeded = () => dbg("negotiationneeded", peerId);
 
-        // do not create offer here; wait for 'ready' event
+        return pc;
     }
 
-    function cleanupRemote() {
-        dbg("cleanupRemote");
-        if (remoteVideoRef.current) {
-            const stream = remoteVideoRef.current.srcObject as MediaStream | null;
-            stream?.getTracks().forEach((t) => t.stop());
-            remoteVideoRef.current.srcObject = null;
+    function closePeer(peerId: string) {
+        const entry = peerMapRef.current.get(peerId);
+        if (entry) {
+            try { entry.pc.getSenders().forEach((s) => s.track && s.track.stop()); } catch { }
+            try { entry.pc.close(); } catch { }
         }
+        peerMapRef.current.delete(peerId);
+        const el = remoteVideoRefs.current[peerId];
+        if (el) {
+            const stream = el.srcObject as MediaStream | null;
+            stream?.getTracks().forEach((t) => t.stop());
+            el.srcObject = null;
+        }
+        needsPlaySetRef.current.delete(peerId);
+    }
+
+    function cleanupAllPeers() {
+        for (const id of Array.from(peerMapRef.current.keys())) {
+            closePeer(id);
+        }
+        refreshPeerIds();
     }
 
     function hangup() {
         dbg("hangup");
         socketRef.current?.emit("leave", { roomId });
-        pcRef.current?.getSenders().forEach((s) => s.track && s.track.stop());
-        pcRef.current?.close();
-        pcRef.current = null;
+        cleanupAllPeers();
         localStreamRef.current?.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
         router.push("/");
@@ -240,13 +291,15 @@ export default function RoomPage() {
 
     async function resumeRemotePlayback() {
         try {
-            if (remoteVideoRef.current) {
-                // unmute and try to resume
-                setRemoteMuted(false);
-                remoteVideoRef.current.muted = false;
-                await remoteVideoRef.current.play();
-                setNeedsRemotePlay(false);
+            for (const peerId of peerIds) {
+                const el = remoteVideoRefs.current[peerId];
+                if (el) {
+                    el.muted = false;
+                    await el.play();
+                }
             }
+            setNeedsRemotePlay(false);
+            needsPlaySetRef.current.clear();
         } catch (_err) {
             setNeedsRemotePlay(true);
         }
@@ -278,13 +331,19 @@ export default function RoomPage() {
                 }
             ).getDisplayMedia({ video: true });
             const videoTrack = display.getVideoTracks()[0];
-            const sender = pcRef.current?.getSenders().find((s) => s.track?.kind === "video");
-            if (sender && videoTrack) {
-                await sender.replaceTrack(videoTrack);
+            if (videoTrack) {
+                for (const [, state] of peerMapRef.current) {
+                    const sender = state.pc.getSenders().find((s) => s.track?.kind === "video");
+                    if (sender) await sender.replaceTrack(videoTrack);
+                }
                 videoTrack.onended = () => {
-                    // revert back to camera when user stops sharing
                     const camTrack = localStreamRef.current?.getVideoTracks()[0];
-                    if (camTrack) sender.replaceTrack(camTrack);
+                    if (camTrack) {
+                        for (const [, state] of peerMapRef.current) {
+                            const sender = state.pc.getSenders().find((s) => s.track?.kind === "video");
+                            if (sender) sender.replaceTrack(camTrack);
+                        }
+                    }
                 };
                 dbg("shareScreen started");
             }
@@ -296,15 +355,14 @@ export default function RoomPage() {
 
     const startedRef = useRef(false);
     useEffect(() => {
-        // Ensure single start per component instance, but allow new rooms to initialize cleanly
         if (!startedRef.current) {
             startedRef.current = true;
             connectSocket();
         }
         return () => {
-            socketRef.current?.removeAllListeners();
-            socketRef.current?.disconnect();
-            pcRef.current?.close();
+            try { socketRef.current?.removeAllListeners(); } catch { }
+            try { socketRef.current?.disconnect(); } catch { }
+            cleanupAllPeers();
             localStreamRef.current?.getTracks().forEach((t) => t.stop());
             startedRef.current = false;
         };
@@ -312,7 +370,7 @@ export default function RoomPage() {
     }, [roomId]);
 
     // Minimal render-time check
-    if (DEBUG) console.log(remoteVideoRef.current?.srcObject);
+    if (DEBUG) console.log(peerIds);
 
     return (
         <Container fluid className="py-3">
@@ -342,28 +400,26 @@ export default function RoomPage() {
             )}
 
             <Row>
-                <Col xs={12} md={8} className="mb-3">
-                    <div className="call-stage d-flex align-items-center justify-content-center">
-                        {/* Remote should never be mirrored */}
-                        <video ref={remoteVideoRef} playsInline autoPlay className="video-surface" />
-                        {needsRemotePlay && (
-                            <div className="position-absolute top-0 start-0 mb-3 w-100 h-100 d-flex align-items-center justify-content-center" style={{ background: "rgba(0,0,0,0.4)" }}>
-                                <Button variant="light" onClick={resumeRemotePlayback}>Click to play remote video</Button>
-                            </div>
-                        )}
-                        <span className="position-absolute top-0 start-0 badge bg-primary m-2">Peer</span>
-                        {/* Local PiP on small screens */}
-                        <div className="local-pip mt-3 d-md-none">
-                            {/* Local preview mirrored for natural self-view */}
-                            <video ref={localPipRef} playsInline autoPlay className="w-100 h-100 mirror" />
+                <Col xs={12} className="mb-3">
+                    <div className="d-flex flex-wrap gap-3 justify-content-center">
+                        {/* Local self-view */}
+                        <div className="position-relative" style={{ width: 280 }}>
+                            <video ref={localSideRef} playsInline autoPlay className="w-100 h-100 mirror" />
+                            <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">You</Badge>
                         </div>
+                        {/* Remote peers grid */}
+                        {peerIds.map((id) => (
+                            <div key={id} className="position-relative" style={{ width: 280 }}>
+                                <video ref={attachRemoteRef(id)} playsInline autoPlay className="w-100 h-100" />
+                                <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{id.slice(0, 6)}</Badge>
+                            </div>
+                        ))}
                     </div>
-                </Col>
-                <Col xs={12} md={4} className="mb-3 d-none d-md-block">
-                    <div className="position-relative">
-                        <video ref={localSideRef} playsInline autoPlay className="video-surface mirror" />
-                        <span className="position-absolute top-0 start-0 badge bg-secondary m-2">You</span>
-                    </div>
+                    {needsRemotePlay && (
+                        <div className="mt-3 d-flex justify-content-center">
+                            <Button variant="light" onClick={resumeRemotePlayback}>Click to play remote videos</Button>
+                        </div>
+                    )}
                 </Col>
             </Row>
 
