@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Button, ButtonGroup, Container, Row, Col, Alert, Badge, ListGroup, Offcanvas } from "react-bootstrap";
+import { Button, ButtonGroup, Container, Row, Col, Alert, Badge, ListGroup, Offcanvas, Form } from "react-bootstrap";
 import io, { Socket } from "socket.io-client";
 
 type SignalMessage =
@@ -68,6 +68,12 @@ export default function RoomPage() {
     const [pinnedId, setPinnedId] = useState<string | "self" | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number>(0);
     const [recentReaction, setRecentReaction] = useState<{ from: string; emoji: string; ts: number } | null>(null);
+    const [showSettings, setShowSettings] = useState(false);
+    const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+    const [videoInputs, setVideoInputs] = useState<MediaDeviceInfo[]>([]);
+    const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
+    const [selectedCamId, setSelectedCamId] = useState<string | null>(null);
+    const [selectedRes, setSelectedRes] = useState<string>(() => typeof window !== 'undefined' ? (localStorage.getItem('vc_selected_res') || '720p') : '720p');
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
@@ -280,6 +286,19 @@ export default function RoomPage() {
             attachLocal(localStageRef.current),
         ]);
 
+        // Enumerate devices after permission
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const aud = devices.filter((d) => d.kind === 'audioinput');
+            const vid = devices.filter((d) => d.kind === 'videoinput');
+            setAudioInputs(aud);
+            setVideoInputs(vid);
+            const savedMic = typeof window !== 'undefined' ? localStorage.getItem('vc_selected_mic') : null;
+            const savedCam = typeof window !== 'undefined' ? localStorage.getItem('vc_selected_cam') : null;
+            setSelectedMicId(savedMic || stream.getAudioTracks()[0]?.getSettings().deviceId || aud[0]?.deviceId || null);
+            setSelectedCamId(savedCam || stream.getVideoTracks()[0]?.getSettings().deviceId || vid[0]?.deviceId || null);
+        } catch { }
+
         // Prepare local audio level monitoring
         try {
             const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -429,6 +448,74 @@ export default function RoomPage() {
         setTimeout(() => setRecentReaction(null), 1500);
     }
 
+    async function switchMicrophone(deviceId: string) {
+        try {
+            const micStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } }, video: false });
+            const newTrack = micStream.getAudioTracks()[0];
+            const oldTrack = localStreamRef.current?.getAudioTracks()[0];
+            if (!newTrack) return;
+            for (const [, state] of peerMapRef.current) {
+                const sender = state.pc.getSenders().find((s) => s.track?.kind === 'audio');
+                if (sender) await sender.replaceTrack(newTrack);
+            }
+            if (oldTrack) {
+                localStreamRef.current?.removeTrack(oldTrack);
+                oldTrack.stop();
+            }
+            localStreamRef.current?.addTrack(newTrack);
+            setSelectedMicId(deviceId);
+            if (typeof window !== 'undefined') localStorage.setItem('vc_selected_mic', deviceId);
+        } catch (e) { setError(String(e)); }
+    }
+
+    function resolutionToConstraints(label: string): MediaTrackConstraints {
+        const map: Record<string, { width: number; height: number }> = {
+            '360p': { width: 640, height: 360 },
+            '480p': { width: 852, height: 480 },
+            '720p': { width: 1280, height: 720 },
+            '1080p': { width: 1920, height: 1080 },
+        };
+        const v = map[label] || map['720p'];
+        return { width: v.width, height: v.height } as MediaTrackConstraints;
+    }
+
+    async function switchCamera(deviceId: string) {
+        try {
+            const constraints = resolutionToConstraints(selectedRes);
+            const camStream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId }, ...constraints }, audio: false });
+            const newTrack = camStream.getVideoTracks()[0];
+            const oldTrack = localStreamRef.current?.getVideoTracks()[0];
+            if (!newTrack) return;
+            for (const [, state] of peerMapRef.current) {
+                const sender = state.pc.getSenders().find((s) => s.track?.kind === 'video');
+                if (sender) await sender.replaceTrack(newTrack);
+            }
+            if (oldTrack) {
+                localStreamRef.current?.removeTrack(oldTrack);
+                oldTrack.stop();
+            }
+            localStreamRef.current?.addTrack(newTrack);
+            // Re-attach to local elements
+            setLocalVideoRef(localSideRef.current);
+            setLocalVideoRef(localStageRef.current);
+            setSelectedCamId(deviceId);
+            if (typeof window !== 'undefined') localStorage.setItem('vc_selected_cam', deviceId);
+        } catch (e) { setError(String(e)); }
+    }
+
+    async function changeResolution(label: string) {
+        setSelectedRes(label);
+        if (typeof window !== 'undefined') localStorage.setItem('vc_selected_res', label);
+        try {
+            const track = localStreamRef.current?.getVideoTracks()[0];
+            if (track && (track as any).applyConstraints) {
+                await (track as any).applyConstraints(resolutionToConstraints(label));
+            } else if (selectedCamId) {
+                await switchCamera(selectedCamId);
+            }
+        } catch (e) { setError(String(e)); }
+    }
+
     // Periodically compute audio levels per peer and highlight active speaker
     const startActiveSpeakerMonitor = useCallback(() => {
         if (statsIntervalRef.current) return;
@@ -573,6 +660,7 @@ export default function RoomPage() {
                             </small>
                             <small className="ms-3 text-white">{new Date(elapsedMs).toISOString().slice(11, 19)}</small>
                             <Button size="sm" variant="outline-light" className="ms-3" onClick={() => setShowRoster(true)}>Participants</Button>
+                            <Button size="sm" variant="outline-light" className="ms-2" onClick={() => setShowSettings(true)}>Settings</Button>
                         </div>
                     </div>
                 </Col>
@@ -657,6 +745,36 @@ export default function RoomPage() {
                             </ListGroup.Item>
                         ))}
                     </ListGroup>
+                </Offcanvas.Body>
+            </Offcanvas>
+
+            {/* Settings Offcanvas */}
+            <Offcanvas show={showSettings} onHide={() => setShowSettings(false)} placement="end" scroll backdrop={false}>
+                <Offcanvas.Header closeButton>
+                    <Offcanvas.Title>Settings</Offcanvas.Title>
+                </Offcanvas.Header>
+                <Offcanvas.Body>
+                    <div className="mb-3">
+                        <strong>Microphone</strong>
+                        <Form.Select className="mt-2" value={selectedMicId ?? ''} onChange={(e) => switchMicrophone(e.target.value)}>
+                            {audioInputs.map(d => (<option key={d.deviceId} value={d.deviceId}>{d.label || `Mic ${d.deviceId.slice(0, 6)}`}</option>))}
+                        </Form.Select>
+                    </div>
+                    <div className="mb-3">
+                        <strong>Camera</strong>
+                        <Form.Select className="mt-2" value={selectedCamId ?? ''} onChange={(e) => switchCamera(e.target.value)}>
+                            {videoInputs.map(d => (<option key={d.deviceId} value={d.deviceId}>{d.label || `Cam ${d.deviceId.slice(0, 6)}`}</option>))}
+                        </Form.Select>
+                    </div>
+                    <div className="mb-3">
+                        <strong>Resolution</strong>
+                        <Form.Select className="mt-2" value={selectedRes} onChange={(e) => changeResolution(e.target.value)}>
+                            <option value="360p">360p</option>
+                            <option value="480p">480p</option>
+                            <option value="720p">720p</option>
+                            <option value="1080p">1080p</option>
+                        </Form.Select>
+                    </div>
                 </Offcanvas.Body>
             </Offcanvas>
 
