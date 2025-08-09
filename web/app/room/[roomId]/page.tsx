@@ -68,6 +68,9 @@ export default function RoomPage() {
     const [pinnedId, setPinnedId] = useState<string | "self" | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number>(0);
     const [recentReaction, setRecentReaction] = useState<{ from: string; emoji: string; ts: number } | null>(null);
+    const [showChat, setShowChat] = useState(false);
+    const [chatInput, setChatInput] = useState("");
+    const [messages, setMessages] = useState<Array<{ from: string; text: string; ts: number }>>([]);
     const [showSettings, setShowSettings] = useState(false);
     const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
     const [videoInputs, setVideoInputs] = useState<MediaDeviceInfo[]>([]);
@@ -268,6 +271,9 @@ export default function RoomPage() {
                 setRecentReaction((cur) => (cur && cur.from === from ? null : cur));
             }, 1500);
         });
+        socket.on("chat", (m: { from: string; text: string; ts: number }) => {
+            setMessages((prev) => [...prev, m].slice(-200));
+        });
     }, [roomId]);
 
     async function setupLocalMedia() {
@@ -446,6 +452,15 @@ export default function RoomPage() {
         // also show locally on self
         setRecentReaction({ from: selfId || "self", emoji, ts: Date.now() });
         setTimeout(() => setRecentReaction(null), 1500);
+    }
+
+    function sendChat() {
+        const text = chatInput.trim();
+        if (!text) return;
+        socketRef.current?.emit("chat", { roomId, text });
+        const selfMsg = { from: selfId || "self", text, ts: Date.now() };
+        setMessages((prev) => [...prev, selfMsg].slice(-200));
+        setChatInput("");
     }
 
     async function switchMicrophone(deviceId: string) {
@@ -660,6 +675,7 @@ export default function RoomPage() {
                             </small>
                             <small className="ms-3 text-white">{new Date(elapsedMs).toISOString().slice(11, 19)}</small>
                             <Button size="sm" variant="outline-light" className="ms-3" onClick={() => setShowRoster(true)}>Participants</Button>
+                            <Button size="sm" variant="outline-light" className="ms-2" onClick={() => setShowChat(true)}>Chat</Button>
                             <Button size="sm" variant="outline-light" className="ms-2" onClick={() => setShowSettings(true)}>Settings</Button>
                         </div>
                     </div>
@@ -745,6 +761,29 @@ export default function RoomPage() {
                             </ListGroup.Item>
                         ))}
                     </ListGroup>
+                </Offcanvas.Body>
+            </Offcanvas>
+
+            {/* Chat Offcanvas */}
+            <Offcanvas show={showChat} onHide={() => setShowChat(false)} placement="end" scroll backdrop={false}>
+                <Offcanvas.Header closeButton>
+                    <Offcanvas.Title>Chat</Offcanvas.Title>
+                </Offcanvas.Header>
+                <Offcanvas.Body>
+                    <div style={{ maxHeight: '60vh', overflowY: 'auto' }} className="mb-3">
+                        {messages.map((m, idx) => (
+                            <div key={idx} className="mb-2">
+                                <small className="text-muted">{m.from.slice(0, 6)} · {new Date(m.ts).toLocaleTimeString()}</small>
+                                <div>{m.text}</div>
+                            </div>
+                        ))}
+                    </div>
+                    <Form onSubmit={(e) => { e.preventDefault(); sendChat(); }}>
+                        <div className="d-flex gap-2">
+                            <Form.Control value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Type a message" />
+                            <Button type="submit">Send</Button>
+                        </div>
+                    </Form>
                 </Offcanvas.Body>
             </Offcanvas>
 

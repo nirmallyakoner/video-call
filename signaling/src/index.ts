@@ -138,6 +138,21 @@ io.on("connection", (socket) => {
         console.log("reaction", { roomId, from: socket.id, emoji, to });
         io.to(roomId).emit("reaction", { from: socket.id, emoji });
     });
+
+    socket.on("chat", ({ roomId, text, to }: { roomId: string; text: string; to?: string }) => {
+        const room = rooms.get(roomId);
+        if (!room || typeof text !== "string") return;
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        const payload = { from: socket.id, text: trimmed.slice(0, 2000), ts: Date.now() };
+        // eslint-disable-next-line no-console
+        console.log("chat", { roomId, from: socket.id, to: to || "room", len: trimmed.length });
+        if (to && room.members.has(to)) {
+            io.to(to).emit("chat", payload);
+        } else {
+            socket.to(roomId).emit("chat", payload);
+        }
+    });
 });
 
 server.listen(PORT, () => {
