@@ -25,6 +25,8 @@ type MemberState = {
 
 type RoomInfo = {
     members: Map<string, MemberState>; // socket id -> state
+    locked: boolean;
+    waiting: Map<string, { name: string }>;
 };
 
 const app = express();
@@ -46,20 +48,25 @@ io.on("connection", (socket) => {
     socket.on("join", ({ roomId, name }: JoinPayload) => {
         // eslint-disable-next-line no-console
         console.log(`join request: room=${roomId} socket=${socket.id}`);
-        const room = rooms.get(roomId) || { members: new Map<string, MemberState>() };
+        const room = rooms.get(roomId) || { members: new Map<string, MemberState>(), locked: false, waiting: new Map() };
         if (room.members.size >= MAX_ROOM_SIZE) {
             socket.emit("error", "room-full");
             return;
         }
-        const role: MemberState["role"] = room.members.size === 0 ? "host" : "guest";
         const safeName = (name && String(name).slice(0, 64)) || `Guest-${socket.id.slice(0, 6)}`;
-        const state: MemberState = {
-            name: safeName,
-            muted: false,
-            videoOn: true,
-            handRaised: false,
-            role,
-        };
+        // If locked and not the first member, put into waiting room
+        if (room.locked && room.members.size > 0) {
+            room.waiting.set(socket.id, { name: safeName });
+            rooms.set(roomId, room);
+            socket.data.waitingRoomId = roomId;
+            socket.emit("waiting");
+            // notify hosts/members of waiting list update
+            io.to(roomId).emit("waiting-list", { list: [...room.waiting.entries()].map(([id, w]) => ({ id, name: w.name })) });
+            return;
+        }
+
+        const role: MemberState["role"] = room.members.size === 0 ? "host" : "guest";
+        const state: MemberState = { name: safeName, muted: false, videoOn: true, handRaised: false, role };
         room.members.set(socket.id, state);
         rooms.set(roomId, room);
 
@@ -69,7 +76,7 @@ io.on("connection", (socket) => {
         const peers = [...room.members.entries()]
             .filter(([id]) => id !== socket.id)
             .map(([id, s]) => ({ id, ...s }));
-        socket.emit("joined", { selfId: socket.id, peers });
+        socket.emit("joined", { selfId: socket.id, selfRole: role, peers });
 
         // Notify others in the room about the new peer
         socket.to(roomId).emit("peer-joined", { id: socket.id, ...state });
@@ -106,6 +113,12 @@ io.on("connection", (socket) => {
             if (room) {
                 room.members.delete(socket.id);
                 if (room.members.size === 0) rooms.delete(roomId);
+            }
+        }
+        // Remove from waiting lists
+        for (const [rid, room] of rooms.entries()) {
+            if (room.waiting?.delete(socket.id)) {
+                io.to(rid).emit("waiting-list", { list: [...room.waiting.entries()].map(([id, w]) => ({ id, name: w.name })) });
             }
         }
     });
@@ -151,6 +164,51 @@ io.on("connection", (socket) => {
             io.to(to).emit("chat", payload);
         } else {
             socket.to(roomId).emit("chat", payload);
+        }
+    });
+
+    socket.on("lock-room", ({ roomId, locked }: { roomId: string; locked: boolean }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const current = room.members.get(socket.id);
+        if (!current || current.role !== "host") return;
+        room.locked = !!locked;
+        rooms.set(roomId, room);
+        io.to(roomId).emit("lock-state", { locked: room.locked });
+    });
+
+    socket.on("admit", ({ roomId, id }: { roomId: string; id: string }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const current = room.members.get(socket.id);
+        if (!current || current.role !== "host") return;
+        const waiting = room.waiting.get(id);
+        if (!waiting) return;
+        const target = io.sockets.sockets.get(id);
+        if (!target) return;
+        room.waiting.delete(id);
+        const state: MemberState = { name: waiting.name, muted: false, videoOn: true, handRaised: false, role: "guest" };
+        room.members.set(id, state);
+        rooms.set(roomId, room);
+        target.join(roomId);
+        // Clear any previous waiting marker
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (target as any).data && ((target as any).data.waitingRoomId = undefined);
+        const peers = [...room.members.entries()].filter(([mid]) => mid !== id).map(([mid, s]) => ({ id: mid, ...s }));
+        target.emit("joined", { selfId: id, selfRole: "guest", peers });
+        // Notify everyone in the room EXCEPT the admitted user
+        target.broadcast.to(roomId).emit("peer-joined", { id, ...state });
+        io.to(roomId).emit("waiting-list", { list: [...room.waiting.entries()].map(([wid, w]) => ({ id: wid, name: w.name })) });
+    });
+
+    socket.on("deny", ({ roomId, id }: { roomId: string; id: string }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const current = room.members.get(socket.id);
+        if (!current || current.role !== "host") return;
+        if (room.waiting.delete(id)) {
+            io.to(roomId).emit("waiting-list", { list: [...room.waiting.entries()].map(([wid, w]) => ({ id: wid, name: w.name })) });
+            io.to(id).emit("denied");
         }
     });
 });

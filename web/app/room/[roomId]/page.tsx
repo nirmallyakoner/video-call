@@ -59,6 +59,7 @@ export default function RoomPage() {
     const [isConnected, setIsConnected] = useState(false);
     const [needsRemotePlay, setNeedsRemotePlay] = useState(false);
     const [selfId, setSelfId] = useState<string>("");
+    const [selfRole, setSelfRole] = useState<"host" | "guest" | null>(null);
     const [peerIds, setPeerIds] = useState<string[]>([]);
     const [nameInput, setNameInput] = useState("");
     const [preJoinName, setPreJoinName] = useState("");
@@ -164,9 +165,11 @@ export default function RoomPage() {
             setError(`signal connect error: ${message}`);
         });
 
-        socket.on("joined", async (payload: JoinedMessage) => {
+        socket.on("joined", async (payload: JoinedMessage & { selfRole?: "host" | "guest" }) => {
             dbg("joined", payload);
             setSelfId(payload.selfId);
+            if (payload.selfRole) setSelfRole(payload.selfRole);
+            setError(null);
             for (const p of payload.peers) {
                 memberStateRef.current.set(p.id, { name: p.name, muted: p.muted, videoOn: p.videoOn, handRaised: p.handRaised, role: p.role });
             }
@@ -199,12 +202,28 @@ export default function RoomPage() {
             }
             refreshPeerIds();
         });
+        socket.on("waiting", () => {
+            setError("Waiting for host to admit you…");
+        });
+        socket.on("waiting-list", ({ list }: { list: Array<{ id: string; name: string }> }) => {
+            waitingListRef.current = list;
+            refreshPeerIds();
+        });
+        socket.on("lock-state", ({ locked }: { locked: boolean }) => {
+            roomLockedRef.current = locked;
+            if (!locked) setError(null);
+        });
+        socket.on("denied", () => {
+            setError("Host denied entry.");
+        });
 
         socket.on("peer-joined", ({ id, name, muted, videoOn, handRaised, role }: { id: string } & MemberState) => {
             dbg("peer-joined", id);
             memberStateRef.current.set(id, { name, muted, videoOn, handRaised, role });
             // Prepare a connection to accept their offer later
             ensurePeerConnection(id, false);
+            // Clear any waiting banner once someone is admitted
+            setError((prev) => (prev && prev.startsWith("Waiting") ? null : prev));
             refreshPeerIds();
         });
 
@@ -441,6 +460,18 @@ export default function RoomPage() {
         } catch {
             // ignore share/copy errors
         }
+    }
+
+    const waitingListRef = useRef<Array<{ id: string; name: string }>>([]);
+    const roomLockedRef = useRef<boolean>(false);
+    function setLocked(next: boolean) {
+        socketRef.current?.emit("lock-room", { roomId, locked: next });
+    }
+    function admit(id: string) {
+        socketRef.current?.emit("admit", { roomId, id });
+    }
+    function deny(id: string) {
+        socketRef.current?.emit("deny", { roomId, id });
     }
 
     function sendReaction(emoji: string) {
@@ -715,22 +746,25 @@ export default function RoomPage() {
                             </div>
                         )}
                         {/* Remote peers grid */}
-                        {peerIds.filter((id) => id !== pinnedId).map((id) => (
-                            <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280, overflow: "hidden" }}>
-                                <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
-                                <Badge bg="primary" className="position-absolute top-0 start-0 m-2">
-                                    {(memberStateRef.current.get(id)?.name || id).slice(0, 12)}
-                                    {memberStateRef.current.get(id)?.handRaised ? ' ✋' : ''}
-                                </Badge>
-                                <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
-                                    {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
-                                </Badge>
-                                <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(pinnedId === id ? null : id)}>{pinnedId === id ? "Unpin" : "Pin"}</Button>
-                                {recentReaction && recentReaction.from === id && (
-                                    <div className="position-absolute top-50 start-50 translate-middle fs-1" style={{ pointerEvents: "none" }}>{recentReaction.emoji}</div>
-                                )}
-                            </div>
-                        ))}
+                        {peerIds
+                            .filter((id) => id !== pinnedId)
+                            .filter((id) => !!peerMapRef.current.get(id)?.remoteStream)
+                            .map((id) => (
+                                <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280, overflow: "hidden" }}>
+                                    <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
+                                    <Badge bg="primary" className="position-absolute top-0 start-0 m-2">
+                                        {(memberStateRef.current.get(id)?.name || id).slice(0, 12)}
+                                        {memberStateRef.current.get(id)?.handRaised ? ' ✋' : ''}
+                                    </Badge>
+                                    <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
+                                        {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
+                                    </Badge>
+                                    <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(pinnedId === id ? null : id)}>{pinnedId === id ? "Unpin" : "Pin"}</Button>
+                                    {recentReaction && recentReaction.from === id && (
+                                        <div className="position-absolute top-50 start-50 translate-middle fs-1" style={{ pointerEvents: "none" }}>{recentReaction.emoji}</div>
+                                    )}
+                                </div>
+                            ))}
                     </div>
                     {needsRemotePlay && (
                         <div className="mt-3 d-flex justify-content-center">
@@ -746,12 +780,24 @@ export default function RoomPage() {
                 </Col>
             </Row>
 
-            {/* Participants Offcanvas */}
+            {/* Participants Offcanvas with host controls */}
             <Offcanvas show={showRoster} onHide={() => setShowRoster(false)} placement="end" scroll backdrop={false}>
                 <Offcanvas.Header closeButton>
                     <Offcanvas.Title>Participants</Offcanvas.Title>
                 </Offcanvas.Header>
                 <Offcanvas.Body>
+                    {selfRole === 'host' && (
+                        <div className="mb-3 d-flex align-items-center justify-content-between">
+                            <div>
+                                <strong>Room</strong>
+                            </div>
+                            <div className="d-flex gap-2">
+                                <Button size="sm" variant={roomLockedRef.current ? 'warning' : 'outline-secondary'} onClick={() => setLocked(!roomLockedRef.current)}>
+                                    {roomLockedRef.current ? 'Unlock' : 'Lock'}
+                                </Button>
+                            </div>
+                        </div>
+                    )}
                     {/* Name editing removed per request – we only show list here */}
                     <ListGroup variant="flush">
                         <ListGroup.Item>
@@ -770,6 +816,20 @@ export default function RoomPage() {
                                 </div>
                             </ListGroup.Item>
                         ))}
+                        {selfRole === 'host' && waitingListRef.current.length > 0 && (
+                            <>
+                                <div className="mt-3 mb-2"><strong>Waiting room</strong></div>
+                                {waitingListRef.current.map((w) => (
+                                    <ListGroup.Item key={w.id} className="d-flex justify-content-between align-items-center">
+                                        <span>{w.name} <small className="text-muted">({w.id.slice(0, 6)})</small></span>
+                                        <span className="d-flex gap-2">
+                                            <Button size="sm" variant="success" onClick={() => admit(w.id)}>Admit</Button>
+                                            <Button size="sm" variant="outline-danger" onClick={() => deny(w.id)}>Deny</Button>
+                                        </span>
+                                    </ListGroup.Item>
+                                ))}
+                            </>
+                        )}
                     </ListGroup>
                 </Offcanvas.Body>
             </Offcanvas>
