@@ -65,6 +65,7 @@ export default function RoomPage() {
     const [showRoster, setShowRoster] = useState(true);
     const [inviteCopied, setInviteCopied] = useState(false);
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+    const [elapsedMs, setElapsedMs] = useState<number>(0);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
@@ -82,6 +83,8 @@ export default function RoomPage() {
     const localAudioContextRef = useRef<AudioContext | null>(null);
     const localAnalyserRef = useRef<AnalyserNode | null>(null);
     const localLevelRef = useRef<number>(0);
+    const meetingStartRef = useRef<number | null>(null);
+    const meetingTimerRef = useRef<number | null>(null);
 
     const refreshPeerIds = useCallback(() => {
         setPeerIds(Array.from(peerMapRef.current.keys()));
@@ -147,6 +150,14 @@ export default function RoomPage() {
             } catch (e) {
                 setError(String(e));
                 return;
+            }
+            if (!meetingStartRef.current) {
+                meetingStartRef.current = Date.now();
+                if (!meetingTimerRef.current) {
+                    meetingTimerRef.current = window.setInterval(() => {
+                        if (meetingStartRef.current) setElapsedMs(Date.now() - meetingStartRef.current);
+                    }, 1000) as unknown as number;
+                }
             }
             // As the new joiner, create offers to all existing peers
             for (const peer of payload.peers) {
@@ -522,6 +533,7 @@ export default function RoomPage() {
                             <small className={isConnected ? "text-success" : "text-danger"}>
                                 {isConnected ? "Connected" : "Disconnected"}
                             </small>
+                            <small className="ms-3 text-muted">{new Date(elapsedMs).toISOString().slice(11, 19)}</small>
                         </div>
                     </div>
                 </Col>
