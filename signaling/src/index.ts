@@ -22,18 +22,25 @@ app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: CORS_ORIGIN, methods: ["GET", "POST"] },
+    transports: ["websocket"],
+    allowUpgrades: false,
+    cors: { origin: CORS_ORIGIN, methods: ["GET", "POST"], credentials: false },
 });
 
 const rooms: Map<string, RoomInfo> = new Map();
 
 io.on("connection", (socket) => {
+    // eslint-disable-next-line no-console
+    console.log("socket connected:", socket.id);
     socket.on("join", ({ roomId }: JoinPayload) => {
+        // eslint-disable-next-line no-console
+        console.log(`join request: room=${roomId} socket=${socket.id}`);
         const room = rooms.get(roomId) || { members: new Set<string>() };
         if (room.members.size >= 2) {
             socket.emit("error", "room-full");
             return;
         }
+        const sizeBefore = room.members.size;
         room.members.add(socket.id);
         rooms.set(roomId, room);
 
@@ -41,10 +48,17 @@ io.on("connection", (socket) => {
         const isInitiator = room.members.size === 1;
         socket.emit("joined", { isInitiator });
 
-        socket.to(roomId).emit("signal", { type: "candidate", candidate: null }); // noop to wake
+        // When the second peer joins, notify both peers they can negotiate
+        if (sizeBefore === 1 && room.members.size === 2) {
+            // eslint-disable-next-line no-console
+            console.log(`room ready: ${roomId} members=${[...room.members].join(",")}`);
+            io.to(roomId).emit("ready");
+        }
     });
 
     socket.on("signal", (payload: SignalPayload) => {
+        // eslint-disable-next-line no-console
+        console.log(`signal ${payload.type} → room ${payload.roomId} from ${socket.id}`);
         const { roomId } = payload;
         socket.to(roomId).emit("signal", payload as any);
     });
