@@ -3,7 +3,7 @@ services:
     name: videochat-signaling
     env: node
     rootDir: signaling
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node dist/index.js
     healthCheckPath: /healthz
     autoDeploy: true
