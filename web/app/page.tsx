@@ -13,16 +13,21 @@ function generateRoomId(): string {
 export default function Home() {
   const router = useRouter();
   const [roomIdInput, setRoomIdInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
 
   const handleCreate = () => {
     const id = generateRoomId();
-    router.push(`/room/${id}`);
+    const name = nameInput.trim();
+    const qs = name ? `?name=${encodeURIComponent(name)}` : "";
+    router.push(`/room/${id}${qs}`);
   };
 
   const handleJoin = (e: React.FormEvent) => {
     e.preventDefault();
     if (!roomIdInput.trim()) return;
-    router.push(`/room/${roomIdInput.trim()}`);
+    const name = nameInput.trim();
+    const qs = name ? `?name=${encodeURIComponent(name)}` : "";
+    router.push(`/room/${roomIdInput.trim()}${qs}`);
   };
 
   return (
@@ -31,10 +36,14 @@ export default function Home() {
         <Col md={8} lg={6}>
           <Card>
             <Card.Body>
-              <Card.Title className="mb-3">1:1 Video Chat</Card.Title>
+              <Card.Title className="mb-3">Group Video Chat</Card.Title>
+              <Form.Group className="mb-3">
+                <Form.Label>Your name</Form.Label>
+                <Form.Control placeholder="Enter display name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} />
+              </Form.Group>
               <div className="d-flex gap-2 mb-4">
                 <Button onClick={handleCreate}>Create new room</Button>
-        </div>
+              </div>
               <Form onSubmit={handleJoin} className="d-flex gap-2">
                 <Form.Control
                   placeholder="Enter room id to join"

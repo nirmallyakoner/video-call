@@ -1,7 +1,7 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Button, ButtonGroup, Container, Row, Col, Alert, Badge, ListGroup, Form } from "react-bootstrap";
+import { Button, ButtonGroup, Container, Row, Col, Alert, Badge, ListGroup, Offcanvas } from "react-bootstrap";
 import io, { Socket } from "socket.io-client";
 
 type SignalMessage =
@@ -42,6 +42,16 @@ type PeerState = {
 export default function RoomPage() {
     const params = useParams();
     const roomId = (params as Record<string, string>).roomId;
+    const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    useEffect(() => {
+        const preset = urlParams?.get('name');
+        if (preset) {
+            setPreJoinName(preset);
+            setNameInput(preset);
+            displayNameRef.current = preset;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     const router = useRouter();
     const [error, setError] = useState<string | null>(null);
     const [muted, setMuted] = useState(false);
@@ -51,33 +61,45 @@ export default function RoomPage() {
     const [selfId, setSelfId] = useState<string>("");
     const [peerIds, setPeerIds] = useState<string[]>([]);
     const [nameInput, setNameInput] = useState("");
+    const [preJoinName, setPreJoinName] = useState("");
+    const [showRoster, setShowRoster] = useState(true);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
     const localSideRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+    const remoteRefCbMapRef = useRef<Record<string, (el: HTMLVideoElement | null) => void>>({});
     const peerMapRef = useRef<Map<string, PeerState>>(new Map());
     const socketRef = useRef<Socket | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
     const needsPlaySetRef = useRef<Set<string>>(new Set());
+    const displayNameRef = useRef<string>("");
 
     const refreshPeerIds = useCallback(() => {
         setPeerIds(Array.from(peerMapRef.current.keys()));
     }, []);
 
-    const attachRemoteRef = (peerId: string) => (el: HTMLVideoElement | null) => {
-        remoteVideoRefs.current[peerId] = el;
-        const peerState = peerMapRef.current.get(peerId);
-        if (el && peerState?.remoteStream) {
-            el.srcObject = peerState.remoteStream;
-            el.playsInline = true;
-            el.autoplay = true as unknown as boolean;
-            el.play().catch(() => {
-                needsPlaySetRef.current.add(peerId);
-                setNeedsRemotePlay(true);
-            });
-        }
-    };
+    const getRemoteRefCallback = useCallback((peerId: string) => {
+        const existing = remoteRefCbMapRef.current[peerId];
+        if (existing) return existing;
+        const cb = (el: HTMLVideoElement | null) => {
+            const prev = remoteVideoRefs.current[peerId];
+            if (prev === el) return;
+            remoteVideoRefs.current[peerId] = el;
+            const peerState = peerMapRef.current.get(peerId);
+            if (el && peerState?.remoteStream) {
+                el.srcObject = peerState.remoteStream;
+                el.playsInline = true;
+                (el as any).autoplay = true;
+                el.play().catch(() => {
+                    needsPlaySetRef.current.add(peerId);
+                    setNeedsRemotePlay(true);
+                });
+            }
+        };
+        remoteRefCbMapRef.current[peerId] = cb;
+        return cb;
+    }, []);
 
     const connectSocket = useMemo(() => () => {
         dbg("SIGNAL_URL", SIGNAL_URL, "room", roomId);
@@ -92,7 +114,7 @@ export default function RoomPage() {
         socket.on("connect", () => {
             setIsConnected(true);
             dbg("socket connected", socket.id);
-            socket.emit("join", { roomId, name: nameInput || undefined });
+            socket.emit("join", { roomId, name: displayNameRef.current || undefined });
             dbg("emit: join", roomId);
         });
         socket.on("disconnect", () => { setIsConnected(false); dbg("socket disconnected"); });
@@ -424,13 +446,13 @@ export default function RoomPage() {
                         {/* Local self-view */}
                         <div className="position-relative" style={{ width: 280 }}>
                             <video ref={localSideRef} playsInline autoPlay className="w-100 h-100 mirror" />
-                            <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">{nameInput || "You"}</Badge>
+                            <Badge bg="secondary" className="position-absolute top-0 start-0 m-2">{displayNameRef.current || "You"}</Badge>
                             <Badge bg={muted ? "danger" : "success"} className="position-absolute top-0 end-0 m-2">{muted ? "Muted" : "Mic On"}</Badge>
                         </div>
                         {/* Remote peers grid */}
                         {peerIds.map((id) => (
                             <div key={id} className="position-relative" style={{ width: 280 }}>
-                                <video ref={attachRemoteRef(id)} playsInline autoPlay className="w-100 h-100" />
+                                <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
                                 <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{(memberStateRef.current.get(id)?.name || id).slice(0, 12)}</Badge>
                                 <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
                                     {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
@@ -444,39 +466,38 @@ export default function RoomPage() {
                         </div>
                     )}
                 </Col>
-                <Col xs={12} md={4} className="mb-3">
-                    <div className="p-3 border rounded">
-                        <div className="mb-2"><strong>Participants</strong></div>
-                        <Form.Group className="mb-3">
-                            <Form.Label>Your name</Form.Label>
-                            <Form.Control
-                                placeholder="Enter display name"
-                                value={nameInput}
-                                onChange={(e) => setNameInput(e.target.value)}
-                            />
-                            <Form.Text>Used when you (re)join</Form.Text>
-                        </Form.Group>
-                        <ListGroup variant="flush">
-                            <ListGroup.Item>
-                                <div className="d-flex justify-content-between align-items-center">
-                                    <span>{nameInput || "You"} <small className="text-muted">({selfId.slice(0, 6)})</small></span>
-                                    <span className={`badge bg-${muted ? "danger" : "success"}`}>{muted ? "Muted" : "Mic On"}</span>
-                                </div>
-                            </ListGroup.Item>
-                            {peerIds.map((id) => (
-                                <ListGroup.Item key={id}>
-                                    <div className="d-flex justify-content-between align-items-center">
-                                        <span>{memberStateRef.current.get(id)?.name || id} <small className="text-muted">({id.slice(0, 6)})</small></span>
-                                        <span className={`badge bg-${memberStateRef.current.get(id)?.muted ? "danger" : "success"}`}>
-                                            {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
-                                        </span>
-                                    </div>
-                                </ListGroup.Item>
-                            ))}
-                        </ListGroup>
-                    </div>
+                <Col xs={12} md={4} className="mb-3 d-flex justify-content-end">
+                    <Button size="sm" variant="outline-light" onClick={() => setShowRoster(true)}>Participants</Button>
                 </Col>
             </Row>
+
+            {/* Participants Offcanvas */}
+            <Offcanvas show={showRoster} onHide={() => setShowRoster(false)} placement="end" scroll backdrop={false}>
+                <Offcanvas.Header closeButton>
+                    <Offcanvas.Title>Participants</Offcanvas.Title>
+                </Offcanvas.Header>
+                <Offcanvas.Body>
+                    {/* Name editing removed per request – we only show list here */}
+                    <ListGroup variant="flush">
+                        <ListGroup.Item>
+                            <div className="d-flex justify-content-between align-items-center">
+                                <span>{displayNameRef.current || "You"} <small className="text-muted">({selfId.slice(0, 6)})</small></span>
+                                <span className={`badge bg-${muted ? "danger" : "success"}`}>{muted ? "Muted" : "Mic On"}</span>
+                            </div>
+                        </ListGroup.Item>
+                        {peerIds.map((id) => (
+                            <ListGroup.Item key={id}>
+                                <div className="d-flex justify-content-between align-items-center">
+                                    <span>{memberStateRef.current.get(id)?.name || id} <small className="text-muted">({id.slice(0, 6)})</small></span>
+                                    <span className={`badge bg-${memberStateRef.current.get(id)?.muted ? "danger" : "success"}`}>
+                                        {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
+                                    </span>
+                                </div>
+                            </ListGroup.Item>
+                        ))}
+                    </ListGroup>
+                </Offcanvas.Body>
+            </Offcanvas>
 
             <Row className="mt-3">
                 <Col className="d-flex justify-content-center">

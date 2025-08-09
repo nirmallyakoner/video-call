@@ -119,6 +119,17 @@ io.on("connection", (socket) => {
         room.members.set(socket.id, updated);
         socket.to(roomId).emit("state-update", { id: socket.id, partial });
     });
+
+    socket.on("rename", ({ roomId, name }: { roomId: string; name: string }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const current = room.members.get(socket.id);
+        if (!current) return;
+        const safeName = (name && String(name).slice(0, 64)) || current.name;
+        const updated: MemberState = { ...current, name: safeName };
+        room.members.set(socket.id, updated);
+        io.to(roomId).emit("state-update", { id: socket.id, partial: { name: safeName } });
+    });
 });
 
 server.listen(PORT, () => {
