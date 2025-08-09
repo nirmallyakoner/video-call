@@ -21,12 +21,14 @@ const ICE_SERVERS: RTCIceServer[] = (() => {
     }
 })();
 
-// Debug logging helper routed directly to console.log
+// Debug logging helper (toggle with DEBUG)
+const DEBUG = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const dbg = (...args: any[]) => {
-    // Use plain console.log as requested
-    // eslint-disable-next-line no-console
-    console.log(...args);
+    if (DEBUG) {
+        // eslint-disable-next-line no-console
+        console.log(...args);
+    }
 };
 
 export default function RoomPage() {
@@ -234,6 +236,20 @@ export default function RoomPage() {
         router.push("/");
     }
 
+    async function resumeRemotePlayback() {
+        try {
+            if (remoteVideoRef.current) {
+                // unmute and try to resume
+                setRemoteMuted(false);
+                remoteVideoRef.current.muted = false;
+                await remoteVideoRef.current.play();
+                setNeedsRemotePlay(false);
+            }
+        } catch (err) {
+            setNeedsRemotePlay(true);
+        }
+    }
+
     function toggleMic() {
         if (!localStreamRef.current) return;
         const track = localStreamRef.current.getAudioTracks()[0];
@@ -289,7 +305,8 @@ export default function RoomPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [roomId]);
 
-    console.log(remoteVideoRef.current?.srcObject);
+    // Minimal render-time check
+    if (DEBUG) console.log(remoteVideoRef.current?.srcObject);
 
     return (
         <Container fluid className="py-3">
@@ -320,10 +337,26 @@ export default function RoomPage() {
 
             <Row>
                 <Col md={6} className="mb-2">
-                    <video ref={localVideoRef} playsInline autoPlay className="w-100 bg-black" />
+                    <div className="position-relative">
+                        <video ref={localVideoRef} playsInline autoPlay className="w-100 bg-black rounded" />
+                        <span className="position-absolute top-0 start-0 badge bg-secondary m-2">You</span>
+                    </div>
                 </Col>
                 <Col md={6} className="mb-2">
-                    <video ref={remoteVideoRef} playsInline autoPlay className="w-100 bg-black" />
+                    <div className="position-relative">
+                        <video ref={remoteVideoRef} playsInline autoPlay className="w-100 bg-black rounded" />
+                        {needsRemotePlay && (
+                            <div
+                                className="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center"
+                                style={{ background: "rgba(0,0,0,0.4)" }}
+                            >
+                                <Button variant="light" onClick={resumeRemotePlayback}>
+                                    Click to play remote video
+                                </Button>
+                            </div>
+                        )}
+                        <span className="position-absolute top-0 start-0 badge bg-primary m-2">Peer</span>
+                    </div>
                 </Col>
             </Row>
 
