@@ -7,7 +7,7 @@ services:
     startCommand: node dist/index.js
     healthCheckPath: /healthz
     autoDeploy: true
-    plan: starter
+    plan: free
     envVars:
       - key: NODE_ENV
         value: production
