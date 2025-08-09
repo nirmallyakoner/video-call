@@ -42,7 +42,8 @@ export default function RoomPage() {
     const [remoteMuted, setRemoteMuted] = useState(true);
     const [needsRemotePlay, setNeedsRemotePlay] = useState(false);
 
-    const localVideoRef = useRef<HTMLVideoElement>(null);
+    const localPipRef = useRef<HTMLVideoElement>(null);
+    const localSideRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const socketRef = useRef<Socket | null>(null);
@@ -156,11 +157,13 @@ export default function RoomPage() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
         localStreamRef.current = stream;
         dbg("gotUserMedia", stream.getTracks().map(t => `${t.kind}:${t.readyState}`));
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = stream;
-            localVideoRef.current.muted = true;
-            await localVideoRef.current.play().catch((err) => { dbg("local video play blocked", err); });
-        }
+        const attachLocal = async (el: HTMLVideoElement | null) => {
+            if (!el) return;
+            el.srcObject = stream;
+            el.muted = true;
+            await el.play().catch((err) => { dbg("local video play blocked", err); });
+        };
+        await Promise.all([attachLocal(localPipRef.current), attachLocal(localSideRef.current)]);
 
         const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
         pcRef.current = pc;
@@ -339,26 +342,25 @@ export default function RoomPage() {
             )}
 
             <Row>
-                <Col md={6} className="mb-2">
-                    <div className="position-relative">
-                        <video ref={localVideoRef} playsInline autoPlay className="w-100 bg-black rounded" />
-                        <span className="position-absolute top-0 start-0 badge bg-secondary m-2">You</span>
-                    </div>
-                </Col>
-                <Col md={6} className="mb-2">
-                    <div className="position-relative">
-                        <video ref={remoteVideoRef} playsInline autoPlay className="w-100 bg-black rounded" />
+                <Col xs={12} md={8} className="mb-3">
+                    <div className="call-stage d-flex align-items-center justify-content-center">
+                        <video ref={remoteVideoRef} playsInline autoPlay className="video-surface" />
                         {needsRemotePlay && (
-                            <div
-                                className="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center"
-                                style={{ background: "rgba(0,0,0,0.4)" }}
-                            >
-                                <Button variant="light" onClick={resumeRemotePlayback}>
-                                    Click to play remote video
-                                </Button>
+                            <div className="position-absolute top-0 start-0 mb-3 w-100 h-100 d-flex align-items-center justify-content-center" style={{ background: "rgba(0,0,0,0.4)" }}>
+                                <Button variant="light" onClick={resumeRemotePlayback}>Click to play remote video</Button>
                             </div>
                         )}
                         <span className="position-absolute top-0 start-0 badge bg-primary m-2">Peer</span>
+                        {/* Local PiP on small screens */}
+                        <div className="local-pip mt-3 d-md-none">
+                            <video ref={localPipRef} playsInline autoPlay className="w-100 h-100" />
+                        </div>
+                    </div>
+                </Col>
+                <Col xs={12} md={4} className="mb-3 d-none d-md-block">
+                    <div className="position-relative">
+                        <video ref={localSideRef} playsInline autoPlay className="video-surface" />
+                        <span className="position-absolute top-0 start-0 badge bg-secondary m-2">You</span>
                     </div>
                 </Col>
             </Row>
