@@ -67,6 +67,7 @@ export default function RoomPage() {
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
     const [pinnedId, setPinnedId] = useState<string | "self" | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number>(0);
+    const [recentReaction, setRecentReaction] = useState<{ from: string; emoji: string; ts: number } | null>(null);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
@@ -254,6 +255,13 @@ export default function RoomPage() {
                 refreshPeerIds();
             }
         });
+        socket.on("reaction", ({ from, emoji }: { from: string; emoji: string }) => {
+            console.log("recv reaction", { from, emoji });
+            setRecentReaction({ from, emoji, ts: Date.now() });
+            window.setTimeout(() => {
+                setRecentReaction((cur) => (cur && cur.from === from ? null : cur));
+            }, 1500);
+        });
     }, [roomId]);
 
     async function setupLocalMedia() {
@@ -349,7 +357,7 @@ export default function RoomPage() {
     function closePeer(peerId: string) {
         const entry = peerMapRef.current.get(peerId);
         if (entry) {
-            try { entry.pc.getSenders().forEach((s) => s.track && s.track.stop()); } catch { }
+            // Do NOT stop local tracks here; that would kill our camera for all remaining peers
             try { entry.pc.close(); } catch { }
         }
         peerMapRef.current.delete(peerId);
@@ -407,6 +415,18 @@ export default function RoomPage() {
         } catch {
             // ignore share/copy errors
         }
+    }
+
+    function sendReaction(emoji: string) {
+        console.log("send reaction", emoji);
+        try {
+            socketRef.current?.emit("reaction", { roomId, emoji });
+        } catch (e) {
+            console.log("reaction emit error", e);
+        }
+        // also show locally on self
+        setRecentReaction({ from: selfId || "self", emoji, ts: Date.now() });
+        setTimeout(() => setRecentReaction(null), 1500);
     }
 
     // Periodically compute audio levels per peer and highlight active speaker
@@ -570,6 +590,7 @@ export default function RoomPage() {
 
 
 
+            {/* Grid below header; stage (if any) is rendered after roster offcanvas to keep z-order sane */}
             <Row>
                 <Col xs={12} md={8} className="mb-3">
                     <div className="d-flex flex-wrap gap-3 justify-content-center">
@@ -584,13 +605,16 @@ export default function RoomPage() {
                         )}
                         {/* Remote peers grid */}
                         {peerIds.filter((id) => id !== pinnedId).map((id) => (
-                            <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280 }}>
+                            <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280, overflow: "hidden" }}>
                                 <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
                                 <Badge bg="primary" className="position-absolute top-0 start-0 m-2">{(memberStateRef.current.get(id)?.name || id).slice(0, 12)}</Badge>
                                 <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
                                     {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
                                 </Badge>
                                 <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(pinnedId === id ? null : id)}>{pinnedId === id ? "Unpin" : "Pin"}</Button>
+                                {recentReaction && recentReaction.from === id && (
+                                    <div className="position-absolute top-50 start-50 translate-middle fs-1" style={{ pointerEvents: "none" }}>{recentReaction.emoji}</div>
+                                )}
                             </div>
                         ))}
                     </div>
@@ -602,7 +626,7 @@ export default function RoomPage() {
                 </Col>
                 <Col xs={12} md={4} className="mb-3 d-flex justify-content-end">
                     <div className="d-flex gap-2">
-                        {pinnedId && <Button size="sm" variant="outline-light" onClick={() => setPinnedId(null)}>Unpin</Button>}
+                        {/* {pinnedId && <Button size="sm" variant="outline-light" onClick={() => setPinnedId(null)}>Unpin</Button>} */}
                         {/* <Button size="sm" variant="outline-light" onClick={() => setShowRoster(true)}>Participants</Button> */}
                     </div>
                 </Col>
@@ -665,6 +689,9 @@ export default function RoomPage() {
                             {cameraOff ? "Camera On" : "Camera Off"}
                         </Button>
                         <Button variant="outline-secondary" onClick={shareScreen}>Share Screen</Button>
+                        <Button variant="outline-secondary" onClick={() => sendReaction("👍")}>👍</Button>
+                        <Button variant="outline-secondary" onClick={() => sendReaction("👏")}>👏</Button>
+                        <Button variant="outline-secondary" onClick={() => sendReaction("✋")}>✋</Button>
                         <Button variant={inviteCopied ? "success" : "outline-secondary"} onClick={invite}>{inviteCopied ? "Link Copied" : "Invite"}</Button>
                         <Button variant="danger" onClick={hangup}>Hang up</Button>
                     </ButtonGroup>

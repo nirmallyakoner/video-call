@@ -130,6 +130,14 @@ io.on("connection", (socket) => {
         room.members.set(socket.id, updated);
         io.to(roomId).emit("state-update", { id: socket.id, partial: { name: safeName } });
     });
+
+    socket.on("reaction", ({ roomId, emoji, to }: { roomId: string; emoji: string; to?: string }) => {
+        const room = rooms.get(roomId);
+        if (!room || typeof emoji !== "string" || emoji.length === 0) return;
+        // eslint-disable-next-line no-console
+        console.log("reaction", { roomId, from: socket.id, emoji, to });
+        io.to(roomId).emit("reaction", { from: socket.id, emoji });
+    });
 });
 
 server.listen(PORT, () => {
