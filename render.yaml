@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: videochat-signaling
+    env: node
+    rootDir: signaling
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    plan: starter
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value:  *
