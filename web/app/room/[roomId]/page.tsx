@@ -63,6 +63,7 @@ export default function RoomPage() {
     const [nameInput, setNameInput] = useState("");
     const [preJoinName, setPreJoinName] = useState("");
     const [showRoster, setShowRoster] = useState(true);
+    const [inviteCopied, setInviteCopied] = useState(false);
     const memberStateRef = useRef<Map<string, MemberState>>(new Map());
 
     const localPipRef = useRef<HTMLVideoElement>(null);
@@ -344,6 +345,21 @@ export default function RoomPage() {
         }
     }
 
+    async function invite() {
+        try {
+            const url = typeof window !== "undefined" ? window.location.href : "";
+            if ((navigator as any).share) {
+                await (navigator as any).share({ title: "Join my room", url });
+            } else if (navigator.clipboard && url) {
+                await navigator.clipboard.writeText(url);
+                setInviteCopied(true);
+                setTimeout(() => setInviteCopied(false), 1500);
+            }
+        } catch {
+            // ignore share/copy errors
+        }
+    }
+
     function toggleMic() {
         if (!localStreamRef.current) return;
         const track = localStreamRef.current.getAudioTracks()[0];
@@ -509,6 +525,7 @@ export default function RoomPage() {
                             {cameraOff ? "Camera On" : "Camera Off"}
                         </Button>
                         <Button variant="outline-secondary" onClick={shareScreen}>Share Screen</Button>
+                        <Button variant={inviteCopied ? "success" : "outline-secondary"} onClick={invite}>{inviteCopied ? "Link Copied" : "Invite"}</Button>
                         <Button variant="danger" onClick={hangup}>Hang up</Button>
                     </ButtonGroup>
                 </Col>
