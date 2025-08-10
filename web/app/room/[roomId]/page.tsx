@@ -1,5 +1,6 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Button, ButtonGroup, Container, Row, Col, Alert, Badge, ListGroup, Offcanvas, Form } from "react-bootstrap";
 import io, { Socket } from "socket.io-client";
@@ -48,8 +49,6 @@ export default function RoomPage() {
     useEffect(() => {
         const preset = urlParams?.get('name');
         if (preset) {
-            setPreJoinName(preset);
-            setNameInput(preset);
             displayNameRef.current = preset;
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -63,8 +62,7 @@ export default function RoomPage() {
     const [selfId, setSelfId] = useState<string>("");
     const [selfRole, setSelfRole] = useState<"host" | "guest" | null>(null);
     const [peerIds, setPeerIds] = useState<string[]>([]);
-    const [nameInput, setNameInput] = useState("");
-    const [preJoinName, setPreJoinName] = useState("");
+    // display name is read-only for now; captured from URL query if provided
     const [showRoster, setShowRoster] = useState(true);
     const [inviteCopied, setInviteCopied] = useState(false);
     const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
@@ -93,7 +91,7 @@ export default function RoomPage() {
     const socketRef = useRef<Socket | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
     const needsPlaySetRef = useRef<Set<string>>(new Set());
-    const localScreenStreamRef = useRef<MediaStream | null>(null);
+    // const localScreenStreamRef = useRef<MediaStream | null>(null);
     const displayNameRef = useRef<string>("");
     const volumeRef = useRef<Map<string, number>>(new Map());
     const prevEnergyRef = useRef<Map<string, { energy: number; duration: number }>>(new Map());
@@ -120,7 +118,7 @@ export default function RoomPage() {
             if (el && peerState?.cameraStream) {
                 el.srcObject = peerState.cameraStream;
                 el.playsInline = true;
-                (el as any).autoplay = true;
+                (el as HTMLVideoElement & { autoplay?: boolean }).autoplay = true as unknown as boolean;
                 el.play().catch(() => {
                     needsPlaySetRef.current.add(peerId);
                     setNeedsRemotePlay(true);
@@ -138,11 +136,12 @@ export default function RoomPage() {
             el.srcObject = stream;
             el.muted = true;
             el.playsInline = true;
-            (el as any).autoplay = true;
+            (el as HTMLVideoElement & { autoplay?: boolean }).autoplay = true as unknown as boolean;
             el.play().catch(() => { /* ignore autoplay block; overlay handles */ });
         }
     }, []);
 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     const connectSocket = useMemo(() => () => {
         dbg("SIGNAL_URL", SIGNAL_URL, "room", roomId);
         const socket = io(SIGNAL_URL, {
@@ -160,9 +159,9 @@ export default function RoomPage() {
             dbg("emit: join", roomId);
         });
         socket.on("disconnect", () => { setIsConnected(false); dbg("socket disconnected"); });
-        socket.io.on("error", (e: unknown) => dbg("socket.io error", e));
+        socket.io.on("error", (e: Error) => dbg("socket.io error", e));
         socket.io.on("reconnect_attempt", () => dbg("reconnect_attempt"));
-        socket.io.on("reconnect_error", (e: unknown) => dbg("reconnect_error", e));
+        socket.io.on("reconnect_error", (e: Error) => dbg("reconnect_error", e));
         socket.io.on("reconnect_failed", () => dbg("reconnect_failed"));
         socket.on("connect_error", (e: Error) => {
             const message = e?.message ?? "connect_error";
@@ -239,8 +238,8 @@ export default function RoomPage() {
             refreshPeerIds();
         });
 
-        socket.on("signal", async (msg: SignalMessage) => {
-            const from = (msg as any).from as string;
+        socket.on("signal", async (msg: SignalMessage & { from?: string }) => {
+            const from = msg.from as string;
             dbg("recv signal", msg.type, "from", from);
             const pc = ensurePeerConnection(from, false);
             try {
@@ -332,7 +331,9 @@ export default function RoomPage() {
 
         // Prepare local audio level monitoring
         try {
-            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+
+            const Ctx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
+            const ctx = new Ctx();
             const src = ctx.createMediaStreamSource(stream);
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 512;
@@ -465,8 +466,9 @@ export default function RoomPage() {
     async function invite() {
         try {
             const url = typeof window !== "undefined" ? window.location.href : "";
-            if ((navigator as any).share) {
-                await (navigator as any).share({ title: "Join my room", url });
+            const navShare = (navigator as unknown as { share?: (data: { title?: string; url?: string }) => Promise<void> }).share;
+            if (navShare) {
+                await navShare({ title: "Join my room", url });
             } else if (navigator.clipboard && url) {
                 await navigator.clipboard.writeText(url);
                 setInviteCopied(true);
@@ -612,14 +614,14 @@ export default function RoomPage() {
                     let best = 0;
                     stats.forEach((r: any) => {
                         if (r.type === "inbound-rtp" && (r.kind === "audio" || r.mediaType === "audio")) {
-                            if (typeof r.audioLevel === "number") {
-                                best = Math.max(best, r.audioLevel);
-                            } else if (typeof r.totalAudioEnergy === "number" && typeof r.totalSamplesDuration === "number") {
-                                const prev = prevEnergyRef.current.get(peerId) || { energy: 0, duration: 0 };
-                                const dE = Math.max(0, r.totalAudioEnergy - prev.energy);
-                                const dT = Math.max(0.001, r.totalSamplesDuration - prev.duration);
+                            if (typeof (r as any).audioLevel === "number") {
+                                best = Math.max(best, (r as any).audioLevel as number);
+                            } else if (typeof (r as any).totalAudioEnergy === "number" && typeof (r as any).totalSamplesDuration === "number") {
+                                const prev = prevEnergyRef.current.get(peerId) || { energy: 0, duration: 0 } as { energy: number; duration: number };
+                                const dE = Math.max(0, ((r as any).totalAudioEnergy as number) - prev.energy);
+                                const dT = Math.max(0.001, ((r as any).totalSamplesDuration as number) - prev.duration);
                                 const level = dE / dT; // average energy in window
-                                prevEnergyRef.current.set(peerId, { energy: r.totalAudioEnergy, duration: r.totalSamplesDuration });
+                                prevEnergyRef.current.set(peerId, { energy: (r as any).totalAudioEnergy as number, duration: (r as any).totalSamplesDuration as number });
                                 best = Math.max(best, level);
                             }
                         }
