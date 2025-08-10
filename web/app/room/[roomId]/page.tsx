@@ -8,7 +8,7 @@ type SignalMessage =
     | { type: "offer"; sdp: RTCSessionDescriptionInit; from: string }
     | { type: "answer"; sdp: RTCSessionDescriptionInit; from: string }
     | { type: "candidate"; candidate: RTCIceCandidateInit; from: string };
-type MemberState = { name: string; muted: boolean; videoOn: boolean; handRaised?: boolean; role: "host" | "guest" };
+type MemberState = { name: string; muted: boolean; videoOn: boolean; handRaised?: boolean; sharing?: boolean; role: "host" | "guest" };
 type JoinedPeer = { id: string } & MemberState;
 type JoinedMessage = { selfId: string; peers: JoinedPeer[] };
 
@@ -34,9 +34,11 @@ const dbg = (...args: any[]) => {
 
 type PeerState = {
     pc: RTCPeerConnection;
-    remoteStream: MediaStream | null;
+    cameraStream: MediaStream | null;
+    screenStream: MediaStream | null;
     pendingCandidates: RTCIceCandidateInit[];
     isCaller: boolean;
+    screenSender?: RTCRtpSender;
 };
 
 export default function RoomPage() {
@@ -84,12 +86,14 @@ export default function RoomPage() {
     const localPipRef = useRef<HTMLVideoElement>(null);
     const localSideRef = useRef<HTMLVideoElement>(null);
     const localStageRef = useRef<HTMLVideoElement>(null);
+    const stageVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
     const remoteRefCbMapRef = useRef<Record<string, (el: HTMLVideoElement | null) => void>>({});
     const peerMapRef = useRef<Map<string, PeerState>>(new Map());
     const socketRef = useRef<Socket | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
     const needsPlaySetRef = useRef<Set<string>>(new Set());
+    const localScreenStreamRef = useRef<MediaStream | null>(null);
     const displayNameRef = useRef<string>("");
     const volumeRef = useRef<Map<string, number>>(new Map());
     const prevEnergyRef = useRef<Map<string, { energy: number; duration: number }>>(new Map());
@@ -99,6 +103,7 @@ export default function RoomPage() {
     const localLevelRef = useRef<number>(0);
     const meetingStartRef = useRef<number | null>(null);
     const meetingTimerRef = useRef<number | null>(null);
+    const sharingRef = useRef<boolean>(false);
 
     const refreshPeerIds = useCallback(() => {
         setPeerIds(Array.from(peerMapRef.current.keys()));
@@ -112,8 +117,8 @@ export default function RoomPage() {
             if (prev === el) return;
             remoteVideoRefs.current[peerId] = el;
             const peerState = peerMapRef.current.get(peerId);
-            if (el && peerState?.remoteStream) {
-                el.srcObject = peerState.remoteStream;
+            if (el && peerState?.cameraStream) {
+                el.srcObject = peerState.cameraStream;
                 el.playsInline = true;
                 (el as any).autoplay = true;
                 el.play().catch(() => {
@@ -344,7 +349,7 @@ export default function RoomPage() {
         if (existing) return existing;
 
         const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-        const state: PeerState = { pc, remoteStream: null, pendingCandidates: [], isCaller };
+        const state: PeerState = { pc, cameraStream: null, screenStream: null, pendingCandidates: [], isCaller };
         peerMapRef.current.set(peerId, state);
 
         const stream = localStreamRef.current;
@@ -353,16 +358,26 @@ export default function RoomPage() {
         }
 
         pc.ontrack = (e) => {
-            const remoteStream = e.streams[0];
-            state.remoteStream = remoteStream;
-            const el = remoteVideoRefs.current[peerId];
-            if (el) {
-                el.srcObject = remoteStream;
-                el.muted = false;
-                el.play().catch(() => {
-                    needsPlaySetRef.current.add(peerId);
-                    setNeedsRemotePlay(true);
-                });
+            const incomingStream = e.streams[0];
+            if (e.track.kind === 'video') {
+                if (!state.cameraStream) {
+                    state.cameraStream = incomingStream;
+                    const el = remoteVideoRefs.current[peerId];
+                    if (el) {
+                        el.srcObject = state.cameraStream;
+                        el.muted = false;
+                        el.play().catch(() => { needsPlaySetRef.current.add(peerId); setNeedsRemotePlay(true); });
+                    }
+                } else if (!state.screenStream && (!state.cameraStream || incomingStream.id !== state.cameraStream.id)) {
+                    state.screenStream = incomingStream;
+                    // Auto-focus stage on screenshare
+                    setPinnedId((cur) => cur || peerId);
+                    // If stage is already showing this peer, update it
+                    if (stageVideoRef.current && pinnedId === peerId) {
+                        stageVideoRef.current.srcObject = state.screenStream;
+                        stageVideoRef.current.play().catch(() => { });
+                    }
+                }
             }
         };
 
@@ -371,10 +386,10 @@ export default function RoomPage() {
             dbg("onaddstream (legacy)");
             const remote = (e as { stream?: MediaStream }).stream;
             if (remote) {
-                state.remoteStream = remote;
+                if (!state.cameraStream) state.cameraStream = remote;
                 const el = remoteVideoRefs.current[peerId];
                 if (el) {
-                    el.srcObject = remote;
+                    el.srcObject = state.cameraStream;
                     el.play?.().catch(() => { needsPlaySetRef.current.add(peerId); setNeedsRemotePlay(true); });
                 }
             }
@@ -649,6 +664,23 @@ export default function RoomPage() {
 
     async function shareScreen() {
         try {
+            if (sharingRef.current) {
+                // Stop sharing: revert to camera
+                const camTrack = localStreamRef.current?.getVideoTracks()[0];
+                if (camTrack) {
+                    for (const [, state] of peerMapRef.current) {
+                        const sender = state.pc.getSenders().find((s) => s.track?.kind === "video");
+                        if (sender) await sender.replaceTrack(camTrack);
+                    }
+                }
+                // Reset local stage video if it was showing our screen
+                if (pinnedId === 'self') {
+                    setLocalVideoRef(stageVideoRef.current);
+                }
+                sharingRef.current = false;
+                socketRef.current?.emit("state-update", { roomId, partial: { sharing: false } });
+                return;
+            }
             const display = await (
                 navigator.mediaDevices as MediaDevices & {
                     getDisplayMedia(options?: DisplayMediaStreamOptions): Promise<MediaStream>;
@@ -668,8 +700,18 @@ export default function RoomPage() {
                             if (sender) sender.replaceTrack(camTrack);
                         }
                     }
+                    sharingRef.current = false;
+                    socketRef.current?.emit("state-update", { roomId, partial: { sharing: false } });
+                    if (pinnedId === 'self') setLocalVideoRef(stageVideoRef.current);
                 };
                 dbg("shareScreen started");
+                sharingRef.current = true;
+                socketRef.current?.emit("state-update", { roomId, partial: { sharing: true } });
+                // If we are pinned, show our screen on stage
+                if (pinnedId === 'self') {
+                    const ms = new MediaStream([videoTrack]);
+                    stageVideoRef.current && (stageVideoRef.current.srcObject = ms, stageVideoRef.current.play?.());
+                }
             }
         } catch (e) {
             setError(String(e));
@@ -748,7 +790,7 @@ export default function RoomPage() {
                         {/* Remote peers grid */}
                         {peerIds
                             .filter((id) => id !== pinnedId)
-                            .filter((id) => !!peerMapRef.current.get(id)?.remoteStream)
+                            .filter((id) => !!peerMapRef.current.get(id)?.cameraStream)
                             .map((id) => (
                                 <div key={id} className={`position-relative ${activeSpeakerId === id ? "border border-3 border-warning" : ""}`} style={{ width: 280, overflow: "hidden" }}>
                                     <video ref={getRemoteRefCallback(id)} playsInline autoPlay className="w-100 h-100" />
@@ -759,6 +801,9 @@ export default function RoomPage() {
                                     <Badge bg={(memberStateRef.current.get(id)?.muted ? "danger" : "success")} className="position-absolute top-0 end-0 m-2">
                                         {memberStateRef.current.get(id)?.muted ? "Muted" : "Mic On"}
                                     </Badge>
+                                    {memberStateRef.current.get(id)?.sharing && (
+                                        <Badge bg="info" className="position-absolute bottom-0 start-0 m-2">Sharing</Badge>
+                                    )}
                                     <Button size="sm" variant="dark" className="position-absolute bottom-0 end-0 m-2" onClick={() => setPinnedId(pinnedId === id ? null : id)}>{pinnedId === id ? "Unpin" : "Pin"}</Button>
                                     {recentReaction && recentReaction.from === id && (
                                         <div className="position-absolute top-50 start-50 translate-middle fs-1" style={{ pointerEvents: "none" }}>{recentReaction.emoji}</div>
@@ -892,11 +937,7 @@ export default function RoomPage() {
                 <Row className="mb-3">
                     <Col xs={12} className="d-flex justify-content-center">
                         <div className={`position-relative ${activeSpeakerId === (pinnedId === "self" ? selfId : pinnedId) ? "border border-3 border-warning" : ""}`} style={{ width: "min(100%, 720px)" }}>
-                            {pinnedId === "self" ? (
-                                <video ref={setLocalVideoRef} playsInline autoPlay className="w-100 h-100 mirror" />
-                            ) : (
-                                <video ref={getRemoteRefCallback(pinnedId)} playsInline autoPlay className="w-100 h-100" />
-                            )}
+                            <video ref={stageVideoRef} playsInline autoPlay className="w-100 h-100" />
                             <Badge bg={pinnedId === "self" ? "secondary" : "primary"} className="position-absolute top-0 start-0 m-2">
                                 {pinnedId === "self" ? (displayNameRef.current || "You").slice(0, 12) : (memberStateRef.current.get(pinnedId)?.name || pinnedId).slice(0, 12)}
                             </Badge>
@@ -915,7 +956,7 @@ export default function RoomPage() {
                         <Button variant={cameraOff ? "outline-danger" : "outline-secondary"} onClick={toggleCam}>
                             {cameraOff ? "Camera On" : "Camera Off"}
                         </Button>
-                        <Button variant="outline-secondary" onClick={shareScreen}>Share Screen</Button>
+                        <Button variant={sharingRef.current ? "warning" : "outline-secondary"} onClick={shareScreen}>{sharingRef.current ? "Stop Share" : "Share Screen"}</Button>
                         <Button variant="outline-secondary" onClick={() => sendReaction("👍")}>👍</Button>
                         <Button variant="outline-secondary" onClick={() => sendReaction("👏")}>👏</Button>
                         <Button variant={handRaisedMe ? "warning" : "outline-secondary"} onClick={toggleHand}>✋</Button>
